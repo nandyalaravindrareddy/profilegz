@@ -1,23 +1,57 @@
-import os, io, time, traceback
+import os, io, time
+import pandas as pd
+import pyarrow.parquet as pq
+import fastavro
+from google.cloud import storage
 from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
-import pandas as pd
-from google.cloud import storage
-from src.data_profiler.profiler import run_profiling  # ensure package path matches your project
-
-app = FastAPI(title="Data Profiler API")
+from src.data_profiler.profiler import run_profiling
+from src.data_profiler.dlp_client import inspect_table_dlp
 
 PROJECT_ID = os.getenv("GCP_PROJECT", "custom-plating-475002-j7")
 
 
-def read_gcs_csv(gcs_path: str, sample_rows: int = 200):
-    # allow local CSV path for dev convenience
+app = FastAPI(title="AI + DLP Data Profiler API")
+
+def read_gcs_file(gcs_path: str, sample_rows: int = 200):
+    """Generic reader to load CSV, Parquet, Avro, or ORC files from GCS or local."""
     if not gcs_path.startswith("gs://"):
-        return pd.read_csv(gcs_path).head(sample_rows)
+        ext = os.path.splitext(gcs_path)[1].lower()
+        if ext == ".csv":
+            return pd.read_csv(gcs_path).head(sample_rows)
+        elif ext == ".parquet":
+            return pd.read_parquet(gcs_path).head(sample_rows)
+        elif ext == ".avro":
+            with open(gcs_path, "rb") as f:
+                reader = fastavro.reader(f)
+                records = [r for _, r in zip(range(sample_rows), reader)]
+                return pd.DataFrame(records)
+        elif ext == ".orc":
+            return pd.read_orc(gcs_path).head(sample_rows)
+        else:
+            raise ValueError(f"Unsupported file format: {ext}")
+
+    # If file is in GCS
     client = storage.Client()
-    bucket, blob = gcs_path.replace("gs://", "").split("/", 1)
-    data = client.bucket(bucket).blob(blob).download_as_bytes()
-    return pd.read_csv(io.BytesIO(data)).head(sample_rows)
+    bucket_name, blob_path = gcs_path.replace("gs://", "").split("/", 1)
+    blob = client.bucket(bucket_name).blob(blob_path)
+    data = blob.download_as_bytes()
+    ext = os.path.splitext(blob_path)[1].lower()
+
+    if ext == ".csv":
+        return pd.read_csv(io.BytesIO(data)).head(sample_rows)
+    elif ext == ".parquet":
+        table = pq.read_table(io.BytesIO(data))
+        return table.to_pandas().head(sample_rows)
+    elif ext == ".avro":
+        bytes_io = io.BytesIO(data)
+        reader = fastavro.reader(bytes_io)
+        records = [r for _, r in zip(range(sample_rows), reader)]
+        return pd.DataFrame(records)
+    elif ext == ".orc":
+        return pd.read_orc(io.BytesIO(data)).head(sample_rows)
+    else:
+        raise ValueError(f"Unsupported file type for {gcs_path}")
 
 
 def make_json_safe(obj):
@@ -44,7 +78,7 @@ async def profile(gcs_path: str = Form(...), sample_rows: int = Form(200), paral
     start_time = time.time()
     try:
         print(f"Loading {gcs_path} (sample_rows={sample_rows})")
-        df = read_gcs_csv(gcs_path, int(sample_rows))
+        df = read_gcs_file(gcs_path, int(sample_rows))
         print(f"Loaded {len(df)} rows x {len(df.columns)} cols")
 
         results = run_profiling(df, project_id=PROJECT_ID, parallel=(str(parallel).lower() in ("true","1","yes")))
