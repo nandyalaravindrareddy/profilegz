@@ -91,12 +91,21 @@ def inspect_table_dlp(project_id: str, df, region="global", max_info_types=140):
             }
             response = client.inspect_content(request={"parent": parent, "inspect_config": inspect_config, "item": item})
             findings = getattr(response.result, "findings", []) or []
+            # Group and deduplicate findings per column
+            type_counter = {}
+            sample_quotes = []
+
             for f in findings:
                 it = f.info_type.name if f.info_type else "UNKNOWN"
-                quote = f.quote if hasattr(f, "quote") else ""
-                summary[col]["info_types"].append(it)
-                if quote:
-                    summary[col]["samples"].append(quote)
+                type_counter[it] = type_counter.get(it, 0) + 1
+                if hasattr(f, "quote") and f.quote:
+                    if f.quote not in sample_quotes:
+                        sample_quotes.append(f.quote)
+
+            # Keep only top 5 samples and unique infoTypes
+            summary[col]["info_types"] = [f"{t} (x{c})" if c > 1 else t for t, c in sorted(type_counter.items(), key=lambda x: x[1], reverse=True)]
+            summary[col]["samples"] = sample_quotes[:5]
+
         except gcp_exceptions.GoogleAPICallError as e:
             # Handle specific API errors (invalid info_type names, region limitations, quota)
             print(f"❌ Error inspecting column {col}: {e}")

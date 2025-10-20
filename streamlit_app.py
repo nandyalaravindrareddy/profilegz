@@ -61,6 +61,105 @@ if res and "result_table" in res:
     else:
         st.info("No sensitive columns detected by DLP")
 
+    # ==========================================
+    # 🧠 INTERACTIVE DLP INFO-TYPE INSIGHTS CHART
+    # ==========================================
+
+    # Collect all DLP infoTypes across columns
+    all_info_types = []
+    for col, meta in rt.items():
+        all_info_types.extend(meta.get("dlp_info_types", []))
+
+    if all_info_types:
+        # Clean infoType names and count occurrences
+        cleaned = []
+        for t in all_info_types:
+            name = t.split(" (x")[0].strip()
+            cleaned.append(name)
+
+        freq_df = (
+            pd.Series(cleaned)
+            .value_counts()
+            .reset_index()
+            .rename(columns={"index": "InfoType", 0: "Count"})
+        )
+
+        # Define color category map for different infoType families
+        category_map = {
+            "EMAIL_ADDRESS": "Contact",
+            "PHONE_NUMBER": "Contact",
+            "PERSON_NAME": "Personal",
+            "DATE": "Personal",
+            "AGE": "Personal",
+            "CREDIT_CARD_NUMBER": "Financial",
+            "BANK_ACCOUNT_NUMBER": "Financial",
+            "IBAN_CODE": "Financial",
+            "IN_PAN": "Financial",
+            "US_SOCIAL_SECURITY_NUMBER": "Financial",
+            "IP_ADDRESS": "Technical",
+            "LOCATION": "Geographical",
+        }
+
+        # Apply categories (default to "Other")
+        freq_df["Category"] = freq_df["InfoType"].apply(lambda x: category_map.get(x, "Other"))
+
+        # Limit to top 15
+        top_n = min(15, len(freq_df))
+        freq_df = freq_df.head(top_n)
+
+        st.markdown("### 📊 DLP InfoType Frequency Distribution")
+        st.caption("Interactive view of most detected DLP infoTypes across your dataset.")
+
+        # --- Create interactive horizontal bar chart ---
+        fig = px.bar(
+            freq_df,
+            x="count",  # fixed lowercase column name
+            y="InfoType",
+            color="Category",
+            orientation="h",
+            hover_data=["Category"],
+            text="count",
+            title=f"Top {top_n} Detected InfoTypes Across Dataset",
+            color_discrete_sequence=px.colors.qualitative.Safe,
+            height=500,
+        )
+
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            yaxis_title="DLP InfoType",
+            xaxis_title="Frequency",
+            showlegend=True,
+            legend_title_text="Category",
+            hovermode="closest",
+            margin=dict(l=80, r=50, t=80, b=50),
+        )
+
+        # ✅ Updated for Streamlit deprecation warning:
+        st.plotly_chart(fig, width="stretch")
+
+
+        # --- Optional click filter simulation ---
+        st.markdown("#### 🎯 Filter Columns by InfoType")
+        selected_info = st.selectbox(
+            "Select a detected InfoType to view affected columns:",
+            ["All"] + freq_df["InfoType"].tolist(),
+            index=0,
+        )
+
+        if selected_info != "All":
+            affected = [
+                c
+                for c, meta in rt.items()
+                if any(selected_info.split(" (x")[0] in it for it in meta.get("dlp_info_types", []))
+            ]
+            if affected:
+                st.success(f"✅ Columns containing `{selected_info}`: {', '.join(affected)}")
+            else:
+                st.info(f"No columns detected with `{selected_info}`.")
+    else:
+        st.info("No DLP infoTypes detected — nothing to plot.")
+
+
     # Column details
     st.markdown("## Column Details")
     cols = list(rt.keys())
@@ -79,9 +178,11 @@ if res and "result_table" in res:
                 st.write("  examples:", r.get("examples"))
         st.markdown("**DLP findings**")
         if md.get("dlp_info_types"):
-            st.success(", ".join(md.get("dlp_info_types")))
+            dlp_unique = list(dict.fromkeys(md.get("dlp_info_types")))  # preserve order, remove dupes
+            st.success(" | ".join(dlp_unique))
         else:
             st.info("No DLP findings")
+
         if md.get("dlp_samples"):
             with st.expander("DLP matched samples"):
                 st.write(md.get("dlp_samples"))
