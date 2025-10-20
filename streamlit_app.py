@@ -113,7 +113,7 @@ if res and "result_table" in res:
         # --- Create interactive horizontal bar chart ---
         fig = px.bar(
             freq_df,
-            x="count",  # fixed lowercase column name
+            x="count",
             y="InfoType",
             color="Category",
             orientation="h",
@@ -126,6 +126,8 @@ if res and "result_table" in res:
 
         fig.update_traces(textposition="outside")
         fig.update_layout(
+            autosize=True,
+            template="plotly_white",
             yaxis_title="DLP InfoType",
             xaxis_title="Frequency",
             showlegend=True,
@@ -134,8 +136,10 @@ if res and "result_table" in res:
             margin=dict(l=80, r=50, t=80, b=50),
         )
 
-        # ✅ Updated for Streamlit deprecation warning:
-        st.plotly_chart(fig, width="stretch")
+        # ✅ Future-proof: Use config instead of deprecated args
+        st.plotly_chart(fig, config={"responsive": True})
+
+
 
 
         # --- Optional click filter simulation ---
