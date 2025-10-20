@@ -1,0 +1,12 @@
+fastapi>=0.90
+uvicorn>=0.22.0
+streamlit>=1.18.0
+pandas>=2.0
+numpy
+google-cloud-storage
+google-cloud-dlp
+vertexai
+tenacity
+requests
+python-multipart
+plotly

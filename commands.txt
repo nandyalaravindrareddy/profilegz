@@ -1,0 +1,8 @@
+cd /Users/swethanandyala/Downloads/dataprofiler_gcp_demo
+
+/opt/homebrew/bin/python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+source .env
+
+streamlit run streamlit_app.py
