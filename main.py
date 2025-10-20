@@ -22,83 +22,6 @@ if not PROJECT_ID:
     except Exception as e:
         PROJECT_ID = "unknown"
         print(f"⚠️ Could not detect project automatically. Falling back to 'unknown'. Error: {e}")
-# --- Backend normalization helper (drop into main.py) ---
-def normalize_result_table(raw_results, dlp_summary=None):
-    """
-    Ensure `result_table` is a dict of:
-      col -> {
-        'inferred_dtype': str,
-        'stats': dict,
-        'rules': list,
-        'classification': str or None,
-        'dlp_info_types': list,
-        'dlp_samples': list,
-        'llm_output': dict or None,
-        'overall_confidence': float  # 0.0-1.0
-      }
-    raw_results: whatever you built earlier (dict)
-    dlp_summary: optional dict mapping col -> {'info_types':[], 'samples':[]}
-    """
-    normalized = {}
-    for col, entry in (raw_results.items() if isinstance(raw_results, dict) else []):
-        if not isinstance(entry, dict):
-            entry = {"inferred_dtype": str(entry), "stats": {}, "rules": []}
-
-        inferred = entry.get("inferred_dtype", entry.get("dtype", "unknown"))
-        stats = entry.get("stats", {}) or {}
-        rules = entry.get("rules", entry.get("profiling_rules", [])) or []
-        llm_output = entry.get("llm_output", entry.get("llm", None))
-        classification = entry.get("classification") or None
-
-        # Attach dlp findings if provided
-        dlp_info_types = []
-        dlp_samples = []
-        if dlp_summary and isinstance(dlp_summary, dict):
-            col_dlp = dlp_summary.get(col)
-            if isinstance(col_dlp, dict):
-                dlp_info_types = col_dlp.get("info_types", []) or []
-                dlp_samples = col_dlp.get("samples", []) or []
-
-        # If DLP found something, prefer the top DLP info_type as classification
-        if dlp_info_types:
-            # sometimes DLP returns duplicates; take most common
-            from collections import Counter
-            top = Counter(dlp_info_types).most_common(1)
-            if top:
-                classification = top[0][0]
-
-        # compute a simple overall confidence:
-        # average of rule confidences (if present) and a boost if DLP exists
-        confs = []
-        for r in rules:
-            try:
-                confs.append(float(r.get("confidence", 0.5)))
-            except Exception:
-                try:
-                    confs.append(float(r) if isinstance(r, (int, float)) else 0.5)
-                except Exception:
-                    confs.append(0.5)
-        # fallback default
-        if not confs:
-            confs = [0.6]
-
-        overall = sum(confs) / len(confs)
-        if dlp_info_types:
-            # boost slightly if DLP found matches
-            overall = min(1.0, overall + 0.15)
-
-        normalized[col] = {
-            "inferred_dtype": inferred,
-            "stats": stats,
-            "rules": rules,
-            "classification": classification,
-            "dlp_info_types": dlp_info_types,
-            "dlp_samples": dlp_samples,
-            "llm_output": llm_output,
-            "overall_confidence": round(float(overall), 3),
-        }
-    return normalized
-
 
 def make_json_safe(obj):
     """Recursively convert numpy, pandas, and datetime objects to JSON-safe Python types."""
@@ -142,24 +65,22 @@ async def profile(gcs_path: str = Form(...), sample_rows: int = Form(5)):
 
         # --- Run profiling ---
         results = run_profiling(df, project_id=PROJECT_ID)
-        # after you compute `results` and `dlp_summary` in your /profile handler:
-        final_results = normalize_result_table(results, dlp_summary)
-        response = {
-            "project": PROJECT_ID,
-            "rows_profiled": len(df),
-            "columns_profiled": len(df.columns),
-            "execution_time_sec": total_time,
-            "result_table": final_results,
-        }
-
 
         # --- Calculate total time ---
         total_time = time.time() - start_time
         print(f"⚡ Total profiling time: {total_time:.2f} sec")
 
+        # --- Construct final response safely ---
+        response_dict = {
+            "project": PROJECT_ID,
+            "rows_profiled": int(len(df)),
+            "columns_profiled": int(len(df.columns)),
+            "execution_time_sec": round(float(total_time), 2),
+            "result_table": results,
+        }
 
-        return JSONResponse(content=make_json_safe(response))
-
+        safe_response = make_json_safe(response_dict)
+        return JSONResponse(content=safe_response)
 
     except Exception as e:
         import traceback
