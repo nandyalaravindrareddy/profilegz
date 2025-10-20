@@ -6,6 +6,7 @@ import json
 from collections import Counter
 import vertexai
 from vertexai.preview.generative_models import GenerativeModel
+import os
 
 # =====================
 # 🎯 Page Configuration
@@ -15,12 +16,13 @@ st.set_page_config(page_title="AI Data Profiler Dashboard", layout="wide")
 st.title("🧠 AI + DLP Data Profiling Dashboard")
 st.caption("Automated data discovery, classification, and profiling powered by Google Cloud DLP & Gemini AI")
 
-BACKEND_URL = "http://127.0.0.1:8080/profile"
-PROJECT_ID = "custom-plating-475002-j7"
-LOCATION = "us-central1"
+PROJECT_ID = os.getenv('GCP_PROJECT', 'custom-plating-475002-j7')
+VERTEX_LOCATION = os.getenv('VERTEX_LOCATION', 'us-central1')
+VERTEX_MODEL = os.getenv('VERTEX_MODEL', 'gemini-2.5-flash')
+BACKEND_URL =  os.getenv('BACKEND_URL', "http://127.0.0.1:8080/profile")
 
 # Initialize Vertex AI
-vertexai.init(project=PROJECT_ID, location=LOCATION)
+vertexai.init(project=PROJECT_ID, location=VERTEX_LOCATION)
 chat_model = GenerativeModel("gemini-2.5-flash")
 
 # Sidebar configuration
