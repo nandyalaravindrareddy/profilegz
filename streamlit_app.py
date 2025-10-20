@@ -2,197 +2,347 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
+import json
+import os
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel
 
 st.set_page_config(page_title="AI Data Profiler Dashboard", layout="wide")
-st.title("🧠 AI + DLP Data Profiler")
-st.caption("Google DLP + Gemini/OpenAI -> profiling rules, classifications, and visual dashboard")
 
-BACKEND = st.sidebar.text_input("Backend URL", "http://127.0.0.1:8080/profile")
+st.title("🧠 AI + DLP Data Profiling Dashboard")
+st.caption("Automated data discovery, classification, and profiling powered by Google Cloud DLP & Gemini AI")
+
+BACKEND_URL = st.sidebar.text_input("Backend URL", "http://127.0.0.1:8080/profile")
 gcs_path = st.sidebar.text_input("GCS path", "gs://sample_data_dataprofiling/customer_sample_global.csv")
-sample_rows = st.sidebar.number_input("Sample rows", min_value=1, max_value=5000, value=100)
-parallel = st.sidebar.checkbox("Run in parallel", value=True)
-run = st.sidebar.button("Run Profiling")
+sample_rows = st.sidebar.number_input("Sample rows", min_value=1, max_value=1000, value=100)
+run_parallel = st.sidebar.checkbox("Run in parallel", value=True)
+run_btn = st.sidebar.button("🚀 Run Profiling")
 
-if "result" not in st.session_state:
-    st.session_state["result"] = None
+# Maintain session states
+if "profiling_result" not in st.session_state:
+    st.session_state["profiling_result"] = None
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
 
-if run:
-    with st.spinner("Running profiler..."):
+# Run profiling when button clicked
+if run_btn:
+    with st.spinner("Profiling data... please wait ⏳"):
         try:
-            resp = requests.post(BACKEND, data={"gcs_path": gcs_path, "sample_rows": sample_rows, "parallel": str(parallel)})
+            resp = requests.post(BACKEND_URL, data={"gcs_path": gcs_path, "sample_rows": sample_rows})
             if resp.status_code == 200:
-                st.session_state["result"] = resp.json()
-                st.success("Profiling finished ✅")
+                st.session_state["profiling_result"] = resp.json()
+                st.success("✅ Profiling completed successfully!")
+                st.rerun()  # Force refresh so chatbot appears instantly
             else:
-                st.error(f"Backend error: {resp.text}")
+                st.error(f"❌ Backend Error: {resp.text}")
         except Exception as e:
-            st.error(f"Failed to call backend: {e}")
+            st.error(f"Error connecting to backend: {e}")
 
-res = st.session_state["result"]
-if res and "result_table" in res:
-    rt = res["result_table"]
-    # Summary metrics
-    st.markdown("## Summary")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Columns", res["columns_profiled"])
-    c2.metric("Rows", res["rows_profiled"])
-    c3.metric("Exec time (s)", res["execution_time_sec"])
-    c4.metric("Project", res.get("project", "unknown"))
+result = st.session_state["profiling_result"]
 
-    # Data type distribution
-    dtype_count = {}
-    for col, meta in rt.items():
-        dtype = meta.get("inferred_dtype", "unknown")
-        dtype_count[dtype] = dtype_count.get(dtype, 0) + 1
-    df_dtype = pd.DataFrame(list(dtype_count.items()), columns=["dtype", "count"])
-    fig = px.pie(df_dtype, names="dtype", values="count", title="Data Type Distribution")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Top sensitive columns by DLP + confidence
-    sens_scores = []
-    for col, meta in rt.items():
-        dtypes = meta.get("dlp_info_types", [])
-        score = meta.get("overall_confidence", 0.0)
-        sens_scores.append({"col": col, "dlp_hits": len(dtypes), "confidence": score, "dlp_types": ", ".join(list(set(dtypes)))})
-    sens_df = pd.DataFrame(sens_scores).sort_values(["dlp_hits", "confidence"], ascending=False)
-    st.markdown("### 🔐 Top sensitive columns (by hits)")
-    if not sens_df.empty:
-        st.dataframe(sens_df.head(10), use_container_width=True)
+# Helper: interpret stats into natural insights
+def interpret_stats(stats):
+    insights = []
+    if not stats:
+        return ["No statistics available."]
+    if stats.get("null_pct", 0) == 0:
+        insights.append("✅ No missing values")
     else:
-        st.info("No sensitive columns detected by DLP")
+        insights.append(f"⚠️ {round(stats['null_pct'] * 100, 2)}% missing values")
+    if stats.get("distinct_pct") == 1:
+        insights.append("🔢 All values unique")
+    elif stats.get("distinct_pct") is not None:
+        insights.append(f"🔢 {round(stats['distinct_pct'] * 100, 1)}% unique values")
+    if "min_date" in stats and "max_date" in stats:
+        insights.append(f"📅 Date range: {stats['min_date']} → {stats['max_date']}")
+    if "mean" in stats:
+        insights.append(f"📈 Average value: {round(stats['mean'], 2)}")
+    return insights
 
-    # ==========================================
-    # 🧠 INTERACTIVE DLP INFO-TYPE INSIGHTS CHART
-    # ==========================================
 
-    # Collect all DLP infoTypes across columns
-    all_info_types = []
-    for col, meta in rt.items():
-        all_info_types.extend(meta.get("dlp_info_types", []))
+# ======================================================
+#  DASHBOARD: Summary + Visualizations + Column Analysis
+# ======================================================
+if result and "result_table" in result:
+    st.markdown("## 📊 Dataset Summary")
 
-    if all_info_types:
-        # Clean infoType names and count occurrences
-        cleaned = []
-        for t in all_info_types:
-            name = t.split(" (x")[0].strip()
-            cleaned.append(name)
+    cols = st.columns(4)
+    cols[0].metric("📁 Columns Profiled", result["columns_profiled"])
+    cols[1].metric("🧾 Rows Profiled", result["rows_profiled"])
+    cols[2].metric("⏱️ Execution Time (sec)", result["execution_time_sec"])
+    cols[3].metric("🧠 Project", result.get("project", "unknown"))
 
-        freq_df = (
-            pd.Series(cleaned)
-            .value_counts()
-            .reset_index()
-            .rename(columns={"index": "InfoType", 0: "Count"})
+    df_summary = []
+    dlp_hits = []
+    for col, data in result["result_table"].items():
+        df_summary.append({
+            "Column": col,
+            "Type": data.get("inferred_dtype", "unknown"),
+            "Classification": data.get("classification", "N/A"),
+            "DLP_Detected": ", ".join(data.get("dlp_info_types", [])) or "None"
+        })
+        if data.get("dlp_info_types"):
+            for info in data["dlp_info_types"]:
+                dlp_hits.append(info)
+
+    df_summary = pd.DataFrame(df_summary)
+
+    # ───────────────────────────────────────────────
+    # 🥧 Data Type Distribution (Fixed for Deprecation)
+    # ───────────────────────────────────────────────
+    st.markdown("### 🥧 Data Type Distribution")
+
+    dtype_counts = {}
+    for col, data in result["result_table"].items():
+        dtype = data.get("inferred_dtype", "unknown")
+        dtype_counts[dtype] = dtype_counts.get(dtype, 0) + 1
+
+    if dtype_counts:
+        dtype_df = pd.DataFrame(
+            list(dtype_counts.items()), columns=["Data Type", "Count"]
+        ).sort_values("Count", ascending=False)
+
+        fig_dtype = px.pie(
+            dtype_df,
+            names="Data Type",
+            values="Count",
+            color="Data Type",
+            color_discrete_sequence=px.colors.qualitative.Vivid,
+            hole=0.3,
+            title="Distribution of Detected Data Types",
         )
 
-        # Define color category map for different infoType families
+        fig_dtype.update_traces(textinfo="percent+label", pull=[0.03] * len(dtype_df))
+        fig_dtype.update_layout(
+            height=420,
+            margin=dict(l=30, r=30, t=60, b=30),
+            title_font=dict(size=16, family="Arial", color="#333"),
+        )
+
+        # ✅ Use modern config style (no warnings)
+        st.plotly_chart(
+            fig_dtype,
+            config={
+                "displayModeBar": False,
+                "responsive": True,
+            },
+            width="stretch",
+        )
+    else:
+        st.info("No data type information available for this dataset.")
+
+
+    # ───────────────────────────────────────────────
+    # 🔐 Sensitive Data Classification Overview (with Category Pie + Filtered Bar)
+    # ───────────────────────────────────────────────
+    st.markdown("### 🔐 Sensitive Data Classification Overview")
+
+    if dlp_hits:
+        # ✅ Normalize InfoType names (remove "(xN)" suffix)
+        import re
+        cleaned_hits = [re.sub(r"\(x?\d+\)", "", h, flags=re.IGNORECASE).strip() for h in dlp_hits]
+
+
+        # ✅ Categorize InfoTypes into groups
         category_map = {
-            "EMAIL_ADDRESS": "Contact",
-            "PHONE_NUMBER": "Contact",
-            "PERSON_NAME": "Personal",
+            "PERSON": "Personal",
+            "EMAIL": "Personal",
+            "PHONE": "Personal",
+            "LOCATION": "Location",
+            "ADDRESS": "Location",
+            "CITY": "Location",
+            "STATE": "Location",
+            "COUNTRY": "Location",
             "DATE": "Personal",
-            "AGE": "Personal",
-            "CREDIT_CARD_NUMBER": "Financial",
-            "BANK_ACCOUNT_NUMBER": "Financial",
-            "IBAN_CODE": "Financial",
-            "IN_PAN": "Financial",
-            "US_SOCIAL_SECURITY_NUMBER": "Financial",
-            "IP_ADDRESS": "Technical",
-            "LOCATION": "Geographical",
+            "GOVERNMENT": "Government",
+            "TAX": "Financial",
+            "BANK": "Financial",
+            "ACCOUNT": "Financial",
+            "IBAN": "Financial",
+            "CREDIT": "Financial",
+            "FINANCE": "Financial",
+            "GENERIC": "General",
+            "CUSTOM": "Custom",
         }
 
-        # Apply categories (default to "Other")
-        freq_df["Category"] = freq_df["InfoType"].apply(lambda x: category_map.get(x, "Other"))
+        def classify_category(info_type):
+            for key, val in category_map.items():
+                if key in info_type.upper():
+                    return val
+            return "Other"
 
-        # Limit to top 15
-        top_n = min(15, len(freq_df))
-        freq_df = freq_df.head(top_n)
+        # ✅ Build DLP DataFrame
+        dlp_df = pd.DataFrame({"InfoType": cleaned_hits})
+        dlp_df["Category"] = dlp_df["InfoType"].apply(classify_category)
 
-        st.markdown("### 📊 DLP InfoType Frequency Distribution")
-        st.caption("Interactive view of most detected DLP infoTypes across your dataset.")
+        # ✅ Frequency summary by Category
+        category_summary = dlp_df["Category"].value_counts().reset_index()
+        category_summary.columns = ["Category", "Count"]
+        category_summary = category_summary.sort_values("Count", ascending=False)
 
-        # --- Create interactive horizontal bar chart ---
-        fig = px.bar(
-            freq_df,
-            x="count",
-            y="InfoType",
+        # ✅ Add Pie Chart for category distribution
+        pie_fig = px.pie(
+            category_summary,
+            names="Category",
+            values="Count",
             color="Category",
-            orientation="h",
-            hover_data=["Category"],
-            text="count",
-            title=f"Top {top_n} Detected InfoTypes Across Dataset",
-            color_discrete_sequence=px.colors.qualitative.Safe,
-            height=500,
+            color_discrete_sequence=px.colors.qualitative.Vivid,
+            hole=0.4,
+            title="Detected Sensitive Data Categories",
         )
 
-        fig.update_traces(textposition="outside")
-        fig.update_layout(
-            autosize=True,
-            template="plotly_white",
-            yaxis_title="DLP InfoType",
-            xaxis_title="Frequency",
+        pie_fig.update_traces(textinfo="percent+label", pull=[0.05] * len(category_summary))
+        pie_fig.update_layout(
             showlegend=True,
-            legend_title_text="Category",
-            hovermode="closest",
-            margin=dict(l=80, r=50, t=80, b=50),
+            height=400,
+            title_font=dict(size=16, family="Arial", color="#333"),
+            margin=dict(l=50, r=50, t=50, b=30),
         )
 
-        # ✅ Future-proof: Use config instead of deprecated args
-        st.plotly_chart(fig, config={"responsive": True})
+        st.plotly_chart(pie_fig, config={"displayModeBar": False}, use_container_width=True)
 
+        # ✅ Aggregate InfoTypes with Category
+        freq_df = dlp_df.groupby(["Category", "InfoType"]).size().reset_index(name="Count")
 
-
-
-        # --- Optional click filter simulation ---
-        st.markdown("#### 🎯 Filter Columns by InfoType")
-        selected_info = st.selectbox(
-            "Select a detected InfoType to view affected columns:",
-            ["All"] + freq_df["InfoType"].tolist(),
+        # ✅ Add category selector for horizontal bar
+        st.markdown("#### 📊 Explore InfoTypes by Category")
+        selected_category = st.selectbox(
+            "Select DLP InfoType Category:",
+            sorted(dlp_df["Category"].unique()),
             index=0,
         )
 
-        if selected_info != "All":
-            affected = [
-                c
-                for c, meta in rt.items()
-                if any(selected_info.split(" (x")[0] in it for it in meta.get("dlp_info_types", []))
-            ]
-            if affected:
-                st.success(f"✅ Columns containing `{selected_info}`: {', '.join(affected)}")
-            else:
-                st.info(f"No columns detected with `{selected_info}`.")
-    else:
-        st.info("No DLP infoTypes detected — nothing to plot.")
+        # ✅ Filter data by category
+        filtered_df = freq_df[freq_df["Category"] == selected_category].sort_values("Count", ascending=True)
+        filtered_df = filtered_df.head(10)
+
+        # ✅ Create horizontal bar chart
+        bar_fig = px.bar(
+            filtered_df,
+            y="InfoType",
+            x="Count",
+            orientation="h",
+            color="Category",
+            title=f"Top 10 Sensitive InfoTypes — {selected_category} Category",
+            text="Count",
+            color_discrete_sequence=px.colors.qualitative.Pastel,
+            height=450,
+        )
+
+        bar_fig.update_traces(
+            texttemplate="%{text}",
+            textposition="outside",
+            marker_line_width=0.8,
+        )
+
+        bar_fig.update_layout(
+            xaxis_title="Detected Occurrences",
+            yaxis_title="InfoType",
+            yaxis=dict(autorange="reversed"),
+            showlegend=False,
+            title_font=dict(size=16, family="Arial", color="#333"),
+            margin=dict(l=100, r=40, t=60, b=40),
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+
+        st.plotly_chart(bar_fig, config={"displayModeBar": False}, use_container_width=True)
 
 
-    # Column details
-    st.markdown("## Column Details")
-    cols = list(rt.keys())
-    sel = st.selectbox("Select column", cols)
-    if sel:
-        md = rt[sel]
-        st.subheader(f"Column: {sel}")
-        st.write("**Classification:**", md.get("classification") or "N/A")
-        st.write("**Inferred Type:**", md.get("inferred_dtype", "N/A"))
-        st.markdown("**Business Insights**")
-        st.write(md.get("stats", {}))
-        st.markdown("**Profiling Rules**")
-        for r in md.get("rules", []):
-            st.write("-", r.get("rule"), f"(confidence: {r.get('confidence', 'N/A')})")
-            if r.get("examples"):
-                st.write("  examples:", r.get("examples"))
-        st.markdown("**DLP findings**")
-        if md.get("dlp_info_types"):
-            dlp_unique = list(dict.fromkeys(md.get("dlp_info_types")))  # preserve order, remove dupes
-            st.success(" | ".join(dlp_unique))
+    st.markdown("### 🧩 Column Classification Summary")
+    st.dataframe(df_summary, use_container_width=True, height=250)
+
+    st.divider()
+    st.subheader("📘 Column-Level Analysis")
+
+    col_names = list(result["result_table"].keys())
+    selected_col = st.selectbox("Select a column for detailed profiling", col_names)
+
+    if selected_col:
+        col_data = result["result_table"][selected_col]
+
+        st.markdown(f"### 🔍 Column: `{selected_col}`")
+        c1, c2 = st.columns(2)
+        c1.metric("📘 Data Type", col_data.get("inferred_dtype", "unknown"))
+        c2.metric("🏷️ Classification", col_data.get("classification", "Not detected"))
+
+        st.markdown("#### 💼 Business Insights")
+        insights = interpret_stats(col_data.get("stats", {}))
+        for i in insights:
+            st.markdown(f"- {i}")
+
+        st.markdown("#### 🧩 Profiling Rules")
+        rules = col_data.get("rules", [])
+        if rules:
+            for rule in rules:
+                st.markdown(f"- {rule.get('rule')} (confidence: {rule.get('confidence')})")
         else:
-            st.info("No DLP findings")
+            st.info("No profiling rules available.")
 
-        if md.get("dlp_samples"):
-            with st.expander("DLP matched samples"):
-                st.write(md.get("dlp_samples"))
-        if md.get("llm_output"):
-            with st.expander("LLM output"):
-                st.write(md.get("llm_output"))
+        st.markdown("#### 🔐 DLP Findings")
+        dlp_types = col_data.get("dlp_info_types", [])
+        if dlp_types:
+            unique_dlp = list(set(dlp_types))
+            st.success(", ".join(unique_dlp))
+        else:
+            st.info("No DLP findings for this column.")
+
+        if col_data.get("dlp_matched_samples"):
+            with st.expander("📋 DLP matched samples"):
+                st.json(col_data["dlp_matched_samples"])
 
 else:
-    st.info("Enter parameters and click Run Profiling")
+    st.info("👈 Enter a GCS path and click **Run Profiling** to begin.")
+
+# ======================================================
+# 🤖 CHATBOT SECTION — Gemini 2.5 Flash Integration
+# ======================================================
+st.markdown("---")
+st.subheader("💬 Ask Questions About Your Profiled Dataset")
+
+if not st.session_state.get("profiling_result"):
+    st.info("Please run profiling first before chatting.")
+else:
+    profiling_result = st.session_state["profiling_result"]
+    project_id = profiling_result.get("project", os.getenv("GCP_PROJECT", "custom-plating-475002-j7"))
+
+    with st.expander("🤖 Chat with Gemini 2.5 Flash", expanded=True):
+        # Display chat history
+        for role, msg in st.session_state.chat_history:
+            if role == "user":
+                st.chat_message("user").write(msg)
+            else:
+                st.chat_message("assistant").write(msg)
+
+        user_input = st.text_input("Ask your question:", key="user_query_input")
+        send_btn = st.button("Send", key="send_query_btn")
+
+        if send_btn and user_input.strip():
+            try:
+                vertexai.init(project=project_id, location="us-central1")
+                model = GenerativeModel("gemini-2.5-flash")
+
+                # Create rich context prompt
+                context = (
+                    "You are an expert data profiling and compliance assistant. "
+                    "Use the profiling JSON below to answer accurately about columns, data quality, "
+                    "and sensitive information detected.\n\n"
+                    f"Profiling Results:\n{json.dumps(profiling_result)[:15000]}"
+                )
+                prompt = f"{context}\n\nUser Question: {user_input}"
+
+                response = model.generate_content(prompt)
+                if response.candidates and response.candidates[0].content.parts:
+                    answer = response.candidates[0].content.parts[0].text
+                else:
+                    answer = "⚠️ Gemini returned no answer."
+
+                # Update session history
+                st.session_state.chat_history.append(("user", user_input))
+                st.session_state.chat_history.append(("assistant", answer))
+
+                # Display conversation
+                st.chat_message("user").write(user_input)
+                st.chat_message("assistant").write(answer)
+
+            except Exception as e:
+                st.error(f"Error during chat: {str(e)}")

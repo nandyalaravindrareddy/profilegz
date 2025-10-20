@@ -17,3 +17,22 @@ source venv/bin/activate
 pip install -r requirements.txt
 source .env
 streamlit run streamlit_app.py
+
+gs://sample_data_dataprofiling/customer_sample_global.csv
+Which columns in this dataset are most likely to contain personal data?
+
+-----
+⚙️ Optimize performance with parallel DLP inspections using executors
+
+📊 Add advanced interactive analytics (charts, insights)
+
+💬 Improve chatbot intelligence (context-aware Q&A over profiling results)
+
+🧠 Enhance DLP/LLM classification accuracy
+
+Which one would you like me to start enhancing first (using your current base code)?
+
+-------
+Would you like me to also add an “InfoType Category Filter” dropdown (e.g., show only “Identifiers”, “Financial”, “Location”, etc.) based on DLP infoType groups?
+That will make your analysis interactive for hackathon demo audiences.
+---

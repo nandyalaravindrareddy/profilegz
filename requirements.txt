@@ -1,14 +1,30 @@
-fastapi>=0.90.0
-uvicorn==0.22.0
-streamlit>=1.18.0
-pandas>=2.0.0
-numpy>=1.25.0
-google-cloud-storage>=2.11.0
-google-cloud-dlp>=3.14.0
-vertexai>=1.11.0
-tenacity>=8.2.0
-requests>=2.31.0
-python-multipart>=0.0.6
-plotly>=5.18.0
-openai>=1.0.0
-pinecone-client>=2.2.1
+# ───────────────────────────────
+# Core Frameworks
+# ───────────────────────────────
+fastapi>=0.115.0
+uvicorn>=0.30.6
+python-multipart>=0.0.9
+requests>=2.32.3
+
+# ───────────────────────────────
+# UI / Visualization
+# ───────────────────────────────
+streamlit>=1.38.0
+plotly>=6.0.0
+pandas>=2.2.3
+numpy>=2.1.1
+
+# ───────────────────────────────
+# Google Cloud SDKs
+# ───────────────────────────────
+google-cloud-storage>=2.18.2
+google-cloud-dlp>=3.17.1
+vertexai>=1.66.0  # Gemini 2.5 Flash support
+google-auth>=2.34.0
+google-api-core>=2.19.0
+
+# ───────────────────────────────
+# Utilities
+# ───────────────────────────────
+tenacity>=9.0.0
+python-dateutil>=2.9.0.post0
