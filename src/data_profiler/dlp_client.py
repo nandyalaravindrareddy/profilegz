@@ -1,114 +1,73 @@
-import math
+import json
 from google.cloud import dlp_v2
-from collections import defaultdict
+import pandas as pd
 
-INFO_TYPE_CACHE = {}
+def inspect_table_dlp(df: pd.DataFrame, project_id: str, location: str = "global"):
+    """
+    Dynamically fetches DLP infoTypes, limits to 140 max (DLP service limit = 150),
+    merges with custom regex detectors for Indian banking & identity data.
+    """
+    print(f"🚀 Starting DLP inspection in region: {location}")
+    dlp_client = dlp_v2.DlpServiceClient(client_options={"api_endpoint": "dlp.googleapis.com"})
+    parent = f"projects/{project_id}/locations/{location}"
 
-def safe_get_valid_info_types(dlp_client, region="global"):
-    """Return list of infoTypes valid in this region (cached)."""
-    if region in INFO_TYPE_CACHE:
-        return INFO_TYPE_CACHE[region]
-
-    parent = f"locations/{region}"
+    # === STEP 1: Fetch available infoTypes ===
     try:
-        response = dlp_client.list_info_types(parent=parent)
-        valid_types = [t.name for t in response.info_types if hasattr(t, "name")]
-        print(f"✅ Found {len(valid_types)} built-in infoTypes in region '{region}'.")
-        INFO_TYPE_CACHE[region] = valid_types
-        return valid_types
+        info_types_response = dlp_client.list_info_types(request={"parent": f"locations/{location}"})
+        all_info_types = [{"name": it.name} for it in info_types_response.info_types]
+        print(f"✅ Found {len(all_info_types)} built-in infoTypes in region '{location}'.")
     except Exception as e:
-        print(f"⚠️ Warning: Unable to list info types for region {region}: {e}")
-        return []
+        print(f"⚠️ Could not list infoTypes for region '{location}': {e}")
+        all_info_types = []
 
+    # === STEP 2: Keep only the top 140 to stay within API limits ===
+    info_types = all_info_types[:140]
+    print(f"⚙️ Using {len(info_types)} built-in detectors (limit = 150).")
 
-def inspect_table_dlp(df,project_id):
-    """
-    Perform DLP inspection on a DataFrame and return findings per column.
-    Auto-handles batching, invalid detectors, and region-specific retries.
-    """
-    print(f"🚀 Starting DLP inspection in region: global")
-    dlp_client = dlp_v2.DlpServiceClient()
+    # === STEP 3: Add domain-specific custom detectors ===
+    custom_info_types = [
+        {"info_type": {"name": "IN_PAN"}, "regex": {"pattern": r"[A-Z]{5}[0-9]{4}[A-Z]{1}"}},
+        {"info_type": {"name": "IN_AADHAAR"}, "regex": {"pattern": r"\b\d{4}\s\d{4}\s\d{4}\b"}},
+        {"info_type": {"name": "IN_IFSC"}, "regex": {"pattern": r"[A-Z]{4}0[A-Z0-9]{6}"}},
+        {"info_type": {"name": "IN_UPI"}, "regex": {"pattern": r"[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}"}},
+        {"info_type": {"name": "BANK_ACCOUNT"}, "regex": {"pattern": r"\b\d{9,18}\b"}}
+    ]
 
-    # ✅ Get global + regional infoTypes
-    global_types = safe_get_valid_info_types(dlp_client, "global")
-    asia_types = safe_get_valid_info_types(dlp_client, "asia-south1")
+    print(f"🧩 Total detectors in use: {len(info_types)} built-in + {len(custom_info_types)} custom")
 
-    combined_info_types = list(dict.fromkeys(global_types + asia_types))
-    print(f"🧩 Total detectors in use: {len(combined_info_types)} built-in + 5 custom")
+    inspect_config = {
+        "include_quote": True,
+        "min_likelihood": dlp_v2.Likelihood.POSSIBLE,
+        "limits": {"max_findings_per_item": 50},
+        "info_types": info_types,
+        "custom_info_types": custom_info_types,
+    }
 
-    if len(combined_info_types) > 150:
-        total_batches = math.ceil(len(combined_info_types) / 150)
-        print(f"⚙️ Using {total_batches} batches to stay under the 150-infoType limit.")
-    else:
-        total_batches = 1
+    summary = {col: {"info_types": [], "samples": []} for col in df.columns}
 
-    summary = defaultdict(lambda: {"info_types": [], "samples": []})
-
+    # === STEP 4: Inspect column by column ===
     for col in df.columns:
         print(f"🧩 Inspecting column: {col}")
-        text_data = "\n".join(df[col].dropna().astype(str).tolist())
-        if not text_data.strip():
-            print(f"⚠️ Skipping column '{col}' (empty or null).")
+        col_values = df[col].dropna().astype(str).tolist()
+        if not col_values:
             continue
 
-        for batch_idx in range(total_batches):
-            start = batch_idx * 150
-            end = start + 150
-            batch_info_types = combined_info_types[start:end]
+        try:
+            item = {"item": {"value": "\n".join(col_values[:200])}}
+            response = dlp_client.inspect_content(
+                request={"parent": parent, "inspect_config": inspect_config, **item}
+            )
+            findings = getattr(response.result, "findings", [])
+            for f in findings:
+                info_type = f.info_type.name if f.info_type else "UNKNOWN"
+                summary[col]["info_types"].append(info_type)
+                if f.quote:
+                    summary[col]["samples"].append(f.quote)
+        except Exception as e:
+            print(f"❌ Error inspecting column {col}: {e}")
 
-            inspect_config = {
-                "include_quote": True,
-                "min_likelihood": dlp_v2.Likelihood.POSSIBLE,
-                "limits": {"max_findings_per_item": 50},
-                "info_types": [{"name": it} for it in batch_info_types],
-            }
+        summary[col]["info_types"] = list(set(summary[col]["info_types"]))
+        summary[col]["samples"] = list(set(summary[col]["samples"]))
 
-            try:
-                response = dlp_client.inspect_content(
-                    request={
-                        "parent": f"projects/{project_id}/locations/global",
-                        "inspect_config": inspect_config,
-                        "item": {"value": text_data},
-                    }
-                )
-
-                findings = getattr(response.result, "findings", [])
-                if findings:
-                    for f in findings:
-                        summary[col]["info_types"].append(f.info_type.name)
-                        if f.quote:
-                            summary[col]["samples"].append(f.quote)
-                    print(f"   ✅ Batch {batch_idx+1}/{total_batches} → {len(findings)} findings so far...")
-
-            except Exception as e:
-                err_msg = str(e)
-                if "Invalid built-in info type name" in err_msg:
-                    print(f"⚠️ Retrying column '{col}' in asia-south1 region (regional fallback)...")
-                    try:
-                        regional_types = [it for it in batch_info_types if it.startswith("IN_")]
-                        if not regional_types:
-                            continue
-
-                        inspect_config["info_types"] = [{"name": it} for it in regional_types]
-                        response = dlp_client.inspect_content(
-                            request={
-                                "parent": f"projects/{project_id}/locations/asia-south1",
-                                "inspect_config": inspect_config,
-                                "item": {"value": text_data},
-                            }
-                        )
-
-                        findings = getattr(response.result, "findings", [])
-                        if findings:
-                            for f in findings:
-                                summary[col]["info_types"].append(f.info_type.name)
-                                if f.quote:
-                                    summary[col]["samples"].append(f.quote)
-                            print(f"   ✅ Regional retry success → {len(findings)} regional findings.")
-                    except Exception as inner:
-                        print(f"❌ Regional retry failed for '{col}': {inner}")
-                else:
-                    print(f"❌ Error inspecting column {col}: {e}")
-
-    print(f"✅ DLP inspection completed successfully.")
-    return dict(summary)
+    print("✅ DLP inspection completed successfully.")
+    return summary
