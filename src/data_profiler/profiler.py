@@ -1,51 +1,103 @@
 import math, time, re
 import pandas as pd, numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
-from .dlp_client import inspect_table_dlp
-from .vertex_client import call_llm_for_columns  # wrapper that supports Vertex or OpenAI
+from .dlp_client import inspect_table_dlp_optimized
+from .vertex_client import call_llm_for_columns_optimized
 import numbers, datetime
+from functools import lru_cache
+import logging
 
-# Local deterministic helpers
-def shannon_entropy(values):
+logger = logging.getLogger(__name__)
+
+# Cache for expensive computations
+@lru_cache(maxsize=1000)
+def cached_shannon_entropy(values_tuple):
+    """Cached entropy calculation for repeated patterns"""
     from collections import Counter
-    cnt = Counter(values)
+    cnt = Counter(values_tuple)
     total = sum(cnt.values()) or 1
     p = [v/total for v in cnt.values()]
     return -sum(x*math.log2(x) for x in p if x>0)
 
-def infer_dtype_and_stats(series: pd.Series):
+def shannon_entropy_optimized(values):
+    """Optimized entropy calculation"""
+    if not values:
+        return 0.0
+    # Convert to tuple for caching
+    values_tuple = tuple(str(v) for v in values if pd.notna(v))
+    return cached_shannon_entropy(values_tuple)
+
+def infer_dtype_and_stats_optimized(series: pd.Series):
+    """Optimized dtype inference with reduced operations"""
     n = len(series)
-    non_null = series.dropna().astype(str)
-    null_pct = round(1 - (len(non_null)/n) if n else 1.0, 3)
+    if n == 0:
+        return {"dtype": "string", "stats": {"null_pct": 1.0, "entropy": 0.0, "distinct_pct": 0.0}}
+    
+    # Single pass for null analysis
+    non_null_mask = series.notna()
+    non_null_count = non_null_mask.sum()
+    null_pct = round(1 - (non_null_count/n) if n else 1.0, 3)
+    
     stats = {"null_pct": null_pct}
     dtype = "string"
-
-    # numeric detection
-    num = pd.to_numeric(series.dropna(), errors="coerce")
-    if len(num) and num.notna().mean() > 0.6:
-        dtype = "int" if (num.dropna() % 1 == 0).all() else "float"
-        stats.update({"min": float(num.min()), "max": float(num.max()), "mean": float(num.mean()), "std": float(num.std())})
-    else:
-        # date detection (sample up to 50 values)
-        try:
-            sample = non_null.sample(min(50, len(non_null))) if len(non_null) else non_null
-            dt = pd.to_datetime(sample, errors="coerce")
-            if dt.notna().mean() > 0.6:
-                dtype = "date"
-                full = pd.to_datetime(non_null, errors="coerce")
-                stats.update({"min_date": str(full.min()), "max_date": str(full.max())})
-            elif set(non_null.str.lower()) <= {"true","false","0","1","yes","no"}:
-                dtype = "boolean"
+    
+    if non_null_count > 0:
+        non_null_series = series[non_null_mask]
+        
+        # Numeric detection with single conversion
+        num_series = pd.to_numeric(non_null_series, errors="coerce")
+        numeric_mask = num_series.notna()
+        numeric_count = numeric_mask.sum()
+        
+        if numeric_count / non_null_count > 0.6:
+            numeric_values = num_series[numeric_mask]
+            if (numeric_values % 1 == 0).all():
+                dtype = "int"
             else:
+                dtype = "float"
+                
+            stats.update({
+                "min": float(numeric_values.min()),
+                "max": float(numeric_values.max()), 
+                "mean": float(numeric_values.mean()),
+                "std": float(numeric_values.std())
+            })
+        else:
+            # String-based type detection
+            sample_size = min(50, non_null_count)
+            sample = non_null_series.sample(sample_size) if sample_size > 0 else non_null_series
+            
+            # Date detection - FIXED: Handle empty samples
+            try:
+                dt_series = pd.to_datetime(sample, errors="coerce")
+                dt_count = dt_series.notna().sum()
+                
+                if len(sample) > 0 and dt_count / len(sample) > 0.6:
+                    dtype = "date"
+                    full_dt = pd.to_datetime(non_null_series, errors="coerce")
+                    stats.update({
+                        "min_date": str(full_dt.min()),
+                        "max_date": str(full_dt.max())
+                    })
+                else:
+                    # Boolean detection
+                    str_sample = sample.astype(str).str.lower()
+                    if set(str_sample) <= {"true", "false", "0", "1", "yes", "no"}:
+                        dtype = "boolean"
+                    else:
+                        dtype = "string"
+            except Exception as e:
+                logger.warning(f"Date detection failed: {e}")
                 dtype = "string"
-        except Exception:
-            dtype = "string"
 
-    stats["entropy"] = round(shannon_entropy(non_null.tolist()), 3)
-    stats["distinct_pct"] = round((series.dropna().nunique() / len(series.dropna())) if len(series.dropna()) else 0, 3)
-
-    # cardinality bucket
+    # Optimized statistics calculation
+    distinct_count = series.nunique()
+    stats["entropy"] = round(shannon_entropy_optimized(series.dropna().tolist()), 3)
+    stats["distinct_pct"] = round(distinct_count / non_null_count if non_null_count else 0, 3)
+    
+    # Cardinality classification
     if stats["distinct_pct"] == 1:
         stats["cardinality"] = "high"
     elif stats["distinct_pct"] >= 0.2:
@@ -55,134 +107,185 @@ def infer_dtype_and_stats(series: pd.Series):
 
     return {"dtype": dtype, "stats": stats}
 
-
-def local_rules(series: pd.Series):
-    import pandas as pd
-    non_null = series.dropna()
-    rules = []
+def local_rules_optimized(series: pd.Series):
+    """Optimized rule generation with reduced operations"""
     n = len(series)
-    # completeness
-    completeness = round(1 - ((n - len(non_null)) / n) if n else 0, 3)
+    rules = []
+    
+    if n == 0:
+        return rules
+    
+    non_null_mask = series.notna()
+    non_null_count = non_null_mask.sum()
+    non_null_series = series[non_null_mask]
+    
+    # Completeness rule
+    completeness = round(non_null_count / n, 3)
     rules.append({"rule": "Must not be null", "confidence": completeness})
-
-    # uniqueness / duplicates
-    unique_ratio = round((len(non_null.unique()) / len(non_null)) if len(non_null) else 0, 3)
+    
+    # Uniqueness analysis
+    unique_count = non_null_series.nunique()
+    unique_ratio = round(unique_count / non_null_count if non_null_count else 0, 3)
     rules.append({"rule": "Should be unique", "confidence": unique_ratio})
-
-    # duplicates sample
-    dup_counts = non_null.value_counts()
-    dups = dup_counts[dup_counts > 1].head(5).to_dict()
-    if dups:
-        rules.append({"rule": "Contains duplicates (top examples)", "confidence": 0.9, "examples": dups})
-
-    # numeric specifics
-    if pd.api.types.is_numeric_dtype(non_null):
+    
+    # Duplicates analysis (only if not highly unique)
+    if unique_ratio < 0.95:
+        dup_counts = non_null_series.value_counts()
+        dups = dup_counts[dup_counts > 1].head(3).to_dict()
+        if dups:
+            rules.append({
+                "rule": "Contains duplicates (top examples)", 
+                "confidence": 0.9, 
+                "examples": dups
+            })
+    
+    # Type-specific rules
+    if pd.api.types.is_numeric_dtype(non_null_series):
         rules.append({"rule": "Numeric range validation", "confidence": 0.95})
-        if (non_null < 0).any():
+        if (non_null_series < 0).any():
             rules.append({"rule": "Contains negative values", "confidence": 0.8})
     else:
-        # string heuristics
-        avg_len = int(non_null.astype(str).map(len).mean()) if len(non_null) else 0
+        # String analysis with sampling
+        sample_size = min(100, non_null_count)
+        str_sample = non_null_series.astype(str).sample(sample_size) if sample_size > 0 else non_null_series.astype(str)
+        
+        avg_len = int(str_sample.str.len().mean()) if len(str_sample) else 0
         rules.append({"rule": f"Average length ≈ {avg_len} chars", "confidence": 0.8})
-        if any("@" in str(x) for x in non_null):
+        
+        # Pattern detection
+        if str_sample.str.contains("@").any():
             rules.append({"rule": "Contains email-like patterns", "confidence": 0.98})
-        # PAN like pattern (India) heuristic
-        if non_null.astype(str).str.match(r"^[A-Z]{5}\d{4}[A-Z]$").mean() > 0.5:
+        
+        # PAN detection with sampling
+        pan_matches = str_sample.str.match(r"^[A-Z]{5}\d{4}[A-Z]$").mean()
+        if pan_matches > 0.5:
             rules.append({"rule": "Matches PAN format (India)", "confidence": 0.9})
-
-    # date check
-    try:
-        sample = non_null.sample(min(20, len(non_null)))
-        dt = pd.to_datetime(sample, errors="coerce")
-        if dt.notna().mean() > 0.5:
-            full = pd.to_datetime(non_null, errors="coerce")
-            rules.append({"rule": f"Date range {full.min().date()} -> {full.max().date()}", "confidence": 0.95})
-    except Exception:
-        pass
 
     return rules
 
+def _enhance_classification(col_data: dict) -> str:
+    """Enhanced classification logic"""
+    # Priority 1: DLP findings
+    dlp_types = col_data.get("dlp_info_types", [])
+    if dlp_types:
+        # Extract primary info type from DLP
+        primary_dlp = dlp_types[0].split(' (x')[0]  # Remove count
+        return primary_dlp
+    
+    # Priority 2: LLM classification
+    llm_output = col_data.get("llm_output", {})
+    if isinstance(llm_output, dict) and llm_output.get("classification"):
+        return llm_output["classification"]
+    
+    # Priority 3: Data type based classification
+    dtype = col_data.get("inferred_dtype", "unknown")
+    stats = col_data.get("stats", {})
+    
+    if dtype == "date":
+        return "Temporal Data"
+    elif dtype in ["int", "float"]:
+        if stats.get("distinct_pct", 0) == 1:
+            return "Unique Identifier"
+        else:
+            return "Numeric Data"
+    elif dtype == "boolean":
+        return "Boolean Flag"
+    else:
+        return "Text Data"
 
-def run_profiling(df: pd.DataFrame, project_id: str, parallel: bool = True, max_workers: int = 8):
+async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: bool = True, max_workers: int = 4):
     """
-    Main orchestrator:
-     - run lightweight local profiling in parallel (columns)
-     - run DLP (batched, with region/global fallback)
-     - optionally call LLM for textual enrichment
+    Optimized profiling orchestrator with async operations and batching
     """
     start = time.time()
     columns = list(df.columns)
     results = {}
-
-    # parallel column profiling
+    
+    # Phase 1: Parallel column profiling
     if parallel:
-        workers = min(max_workers, max(1, len(columns)))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(infer_dtype_and_stats, df[c]): c for c in columns}
-            for fut in as_completed(futures):
-                col = futures[fut]
+        # Use ProcessPoolExecutor for CPU-bound tasks
+        with ProcessPoolExecutor(max_workers=min(max_workers, len(columns))) as executor:
+            futures = {
+                executor.submit(infer_dtype_and_stats_optimized, df[col]): col 
+                for col in columns
+            }
+            
+            for future in as_completed(futures):
+                col = futures[future]
                 try:
-                    prof = fut.result()
+                    prof = future.result(timeout=30)
+                    rules = local_rules_optimized(df[col])
+                    results[col] = {
+                        "inferred_dtype": prof["dtype"],
+                        "stats": prof["stats"],
+                        "rules": rules,
+                        "classification": None
+                    }
                 except Exception as e:
-                    prof = {"dtype": "string", "stats": {"null_pct": 1.0}}
-                    print("Profiling error for", col, e)
-                rules = local_rules(df[col])
-                results[col] = {
-                    "inferred_dtype": prof["dtype"],
-                    "stats": prof["stats"],
-                    "rules": rules,
-                    "classification": None
-                }
+                    logger.warning(f"Profiling error for {col}: {e}")
+                    results[col] = {
+                        "inferred_dtype": "string",
+                        "stats": {"null_pct": 1.0},
+                        "rules": [],
+                        "classification": None
+                    }
     else:
-        for c in columns:
-            prof = infer_dtype_and_stats(df[c])
-            results[c] = {
+        # Sequential fallback
+        for col in columns:
+            prof = infer_dtype_and_stats_optimized(df[col])
+            results[col] = {
                 "inferred_dtype": prof["dtype"],
                 "stats": prof["stats"],
-                "rules": local_rules(df[c]),
+                "rules": local_rules_optimized(df[col]),
                 "classification": None
             }
-
-    # DLP inspection (single shot but batched internally to respect infoType limits)
+    
+    # Phase 2: Async DLP inspection
     try:
-        dlp_summary = inspect_table_dlp(project_id, df)
+        dlp_summary = await inspect_table_dlp_optimized(project_id, df)
     except Exception as e:
-        print("DLP failed:", e)
-        dlp_summary = {c: {"info_types": [], "samples": []} for c in columns}
-
-    # Merge DLP results (give DLP priority)
+        logger.error(f"DLP failed: {e}")
+        dlp_summary = {c: {"info_types": [], "samples": [], "categories": []} for c in columns}
+    
+    # Merge DLP results
     for col, meta in dlp_summary.items():
-        if col not in results:
-            # safety: if DLP returned a column not present, skip
-            continue
-        results[col]["dlp_info_types"] = meta.get("info_types", [])
-        results[col]["dlp_samples"] = meta.get("samples", [])
-        # choose top DLP label if any
-        if meta.get("info_types"):
-            top = Counter(meta["info_types"]).most_common(1)[0][0]
-            results[col]["classification"] = top
-
-    # LLM enrichment for ambiguous or string columns (small sample) — parallel
-    text_cols = [c for c, v in results.items() if v["inferred_dtype"] == "string" and not results[c].get("classification")]
-    if text_cols and len(df) <= 1000:  # avoid huge LLM cost / latency
-        samples = {c: df[c].dropna().astype(str).head(20).tolist() for c in text_cols}
+        if col in results:
+            results[col]["dlp_info_types"] = meta.get("info_types", [])
+            results[col]["dlp_samples"] = meta.get("samples", [])
+            results[col]["categories"] = meta.get("categories", [])
+            results[col]["primary_category"] = meta.get("primary_category", "No Category")
+    
+    # Phase 3: Optimized LLM enrichment (batched)
+    text_cols = [
+        c for c, v in results.items() 
+        if (v["inferred_dtype"] == "string" and 
+            not results[c].get("classification") and
+            len(df) <= 500)
+    ]
+    
+    if text_cols:
+        # Batch samples for LLM
+        samples = {
+            c: df[c].dropna().astype(str).head(10).tolist()
+            for c in text_cols
+        }
         try:
-            llm_outputs = call_llm_for_columns(samples)  # returns dict col->parsed json
+            llm_outputs = await call_llm_for_columns_optimized(samples)
             for c, out in llm_outputs.items():
-                results[c]["llm_output"] = out
-                if isinstance(out, dict) and out.get("classification"):
-                    results[c]["classification"] = out["classification"]
-                # append LLM rules (if any)
-                for rule in out.get("profiling_rules", []) if isinstance(out, dict) else []:
-                    results[c]["rules"].append({**rule, "source": "llm"})
+                if c in results:
+                    results[c]["llm_output"] = out
         except Exception as e:
-            print("LLM enrichment skipped:", e)
-
-    # compute overall_confidence metric (avg rule confidence)
+            logger.warning(f"LLM enrichment skipped: {e}")
+    
+    # Enhanced classification after all processing
+    for col, meta in results.items():
+        meta["classification"] = _enhance_classification(meta)
+    
+    # Final confidence calculation
     for c, meta in results.items():
         confs = [r.get("confidence", 0.5) for r in meta.get("rules", []) if isinstance(r, dict)]
         meta["overall_confidence"] = round(float(sum(confs)/len(confs)) if confs else 0.5, 3)
-
-    total = round(time.time() - start, 2)
-    print(f"Profiling finished in {total}s")
+    
+    total_time = round(time.time() - start, 2)
+    logger.info(f"Profiling finished in {total_time}s")
     return results

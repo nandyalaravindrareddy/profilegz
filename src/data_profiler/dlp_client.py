@@ -2,17 +2,29 @@ from google.cloud import dlp_v2
 from google.api_core import exceptions as gcp_exceptions
 from collections import defaultdict
 import math, time, traceback
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import logging
+from typing import Dict, List, Any
+import pandas as pd
 
-# small curated high-value builtins (keeps request < 150)
-HIGH_PRIORITY_INFO_TYPES = [
-    "EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON_NAME", "CREDIT_CARD_NUMBER", "US_SOCIAL_SECURITY_NUMBER",
-    "IP_ADDRESS", "DATE", "IBAN_CODE", "BANK_ACCOUNT_NUMBER", "ACCOUNT_NUMBER",
-    "USERNAME", "US_PASSPORT", "US_DRIVERS_LICENSE_NUMBER", "AGE", "GENDER",
-    "IN_PAN", "IN_AADHAAR",  # note: some region issues; we'll handle errors gracefully
+logger = logging.getLogger(__name__)
+
+# Optimized info types with better categorization
+DIVERSE_INFO_TYPES = [
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON_NAME", 
+    "CREDIT_CARD_NUMBER", "US_SOCIAL_SECURITY_NUMBER",
+    "IP_ADDRESS", "DATE_OF_BIRTH", "IBAN_CODE", 
+    "BANK_ACCOUNT_NUMBER", "ACCOUNT_NUMBER",
+    "US_PASSPORT", "US_DRIVERS_LICENSE_NUMBER", 
+    "AGE", "GENDER", "STREET_ADDRESS", "CITY",
+    "STATE", "COUNTRY", "ZIP_CODE", "IN_PAN", 
+    "IN_AADHAAR", "LOCATION", "COORDINATE",
+    "VEHICLE_IDENTIFICATION_NUMBER", "MAC_ADDRESS",
+    "IMEI_HARDWARE_ID", "URL", "DOMAIN_NAME"
 ]
 
 CUSTOM_INFO_TYPES = [
-    # custom regex examples
     {
         "info_type": {"name": "CUSTOM_PAN_REGEX"},
         "regex": {"pattern": r"[A-Z]{5}\d{4}[A-Z]"}
@@ -23,109 +35,140 @@ CUSTOM_INFO_TYPES = [
     },
 ]
 
-def list_region_info_types(client, project_id, region="global"):
-    # Try to list info types for a region. If fails, return None and rely on curated list.
+# Client caching to avoid repeated initialization
+_dlp_client = None
+_info_type_cache = {}
+
+def get_dlp_client():
+    """Get cached DLP client"""
+    global _dlp_client
+    if _dlp_client is None:
+        _dlp_client = dlp_v2.DlpServiceClient()
+    return _dlp_client
+
+async def list_region_info_types_optimized(client, project_id: str, region: str = "global"):
+    """Cached info type listing"""
+    cache_key = f"{project_id}_{region}"
+    if cache_key in _info_type_cache:
+        return _info_type_cache[cache_key]
+    
     try:
         parent = f"projects/{project_id}/locations/{region}"
         response = client.list_info_types(request={"parent": parent})
         types = [it.name for it in response.info_types]
+        _info_type_cache[cache_key] = types
         return types
     except Exception as e:
+        logger.warning(f"Failed to list info types for {region}: {e}")
+        _info_type_cache[cache_key] = None
         return None
 
+def _categorize_finding(info_type: str) -> str:
+    """Better categorization of DLP findings"""
+    info_type_upper = info_type.upper()
+    
+    # Personal Identifiers
+    if any(term in info_type_upper for term in ['EMAIL', 'PHONE', 'PERSON', 'NAME', 'DOB', 'AGE', 'GENDER']):
+        return "Personal Identifiers"
+    
+    # Government IDs
+    elif any(term in info_type_upper for term in ['PAN', 'AADHAAR', 'PASSPORT', 'DRIVERS', 'SSN', 'VOTER']):
+        return "Government IDs"
+    
+    # Financial Information
+    elif any(term in info_type_upper for term in ['BANK', 'ACCOUNT', 'CREDIT', 'IBAN', 'FINANCE', 'TRANSACTION']):
+        return "Financial Information"
+    
+    # Location Data
+    elif any(term in info_type_upper for term in ['ADDRESS', 'LOCATION', 'CITY', 'STATE', 'COUNTRY', 'ZIP', 'POSTAL']):
+        return "Location Data"
+    
+    # Digital Identifiers
+    elif any(term in info_type_upper for term in ['IP', 'USERNAME', 'DEVICE', 'COOKIE', 'TOKEN']):
+        return "Digital Identifiers"
+    
+    # Generic Personal
+    elif any(term in info_type_upper for term in ['DATE', 'BIRTH', 'GENDER']):
+        return "Personal Data"
+    
+    else:
+        return "Other Sensitive Data"
 
-def _dlp_table_from_col(col_name, series):
+def _dlp_table_from_col_optimized(col_name, series):
+    """Optimized single column table creation"""
+    # Sample data for efficiency
+    sample_data = series.dropna().astype(str).head(50)
     headers = [{"name": col_name}]
-    rows = []
-    for v in series.fillna("").astype(str).tolist():
-        rows.append({"values": [{"string_value": v}]})
+    rows = [{"values": [{"string_value": str(v)}]} for v in sample_data]
     return {"table": {"headers": headers, "rows": rows}}
 
-
-def inspect_table_dlp(project_id: str, df, region="global", max_info_types=140):
+async def inspect_table_dlp_optimized(project_id: str, df, region: str = "global", max_info_types: int = 100):
     """
-    Inspect each dataframe column using DLP.
-    - Use curated high-priority info types, plus a few custom regex detectors.
-    - If the total info types exceed DLP limits, batch them.
+    Optimized DLP inspection with better classification
     """
-    print("🚀 Starting DLP inspection in region:", region)
-    client = dlp_v2.DlpServiceClient()
+    logger.info("🚀 Starting optimized DLP inspection")
+    client = get_dlp_client()
     parent = f"projects/{project_id}"
-
-    # Try list region info types (best-effort)
+    
+    # Get available types or use diverse set
     try:
-        available = list_region_info_types(client, project_id, region=region)
-        if available and len(available) > 0:
-            # choose intersection of HIGH_PRIORITY and available
-            info_types = [it for it in HIGH_PRIORITY_INFO_TYPES if it in available]
-            if len(info_types) < len(HIGH_PRIORITY_INFO_TYPES):
-                # extend with some available types up to max_info_types
-                for it in available:
-                    if it not in info_types and len(info_types) < max_info_types:
-                        info_types.append(it)
+        available_types = await list_region_info_types_optimized(client, project_id, region)
+        if available_types:
+            # Use intersection with diverse types
+            info_types = [it for it in DIVERSE_INFO_TYPES if it in available_types]
+            # Add additional available types
+            for it in available_types:
+                if it not in info_types and len(info_types) < max_info_types:
+                    info_types.append(it)
         else:
-            # fallback to curated list (some may error but we'll catch)
-            info_types = HIGH_PRIORITY_INFO_TYPES.copy()
+            info_types = DIVERSE_INFO_TYPES.copy()
     except Exception:
-        info_types = HIGH_PRIORITY_INFO_TYPES.copy()
-
-    # ensure under the allowed limit (DLP max ~150)
-    if len(info_types) > max_info_types:
-        info_types = info_types[:max_info_types]
-
-    # prepare summary structure
-    summary = {col: {"info_types": [], "samples": []} for col in df.columns}
-
-    # Inspect column-by-column to map findings to column names (less error-prone)
+        info_types = DIVERSE_INFO_TYPES.copy()
+    
+    info_types = info_types[:max_info_types]
+    
+    summary = {col: {"info_types": [], "samples": [], "categories": []} for col in df.columns}
+    
+    # Process columns individually for better accuracy
     for col in df.columns:
         try:
-            item = _dlp_table_from_col(col, df[col].dropna().astype(str))
-            # If large number of info types, we can call inspect_content once (info_types limited) —
-            # but DLP requires info_types list objects
+            item = _dlp_table_from_col_optimized(col, df[col])
             inspect_config = {
                 "include_quote": True,
                 "min_likelihood": dlp_v2.Likelihood.POSSIBLE,
-                "limits": {"max_findings_per_item": 100},
+                "limits": {"max_findings_per_item": 50},
                 "info_types": [{"name": n} for n in info_types],
                 "custom_info_types": CUSTOM_INFO_TYPES
             }
-            response = client.inspect_content(request={"parent": parent, "inspect_config": inspect_config, "item": item})
+            
+            response = client.inspect_content(
+                request={"parent": parent, "inspect_config": inspect_config, "item": item}
+            )
+            
             findings = getattr(response.result, "findings", []) or []
-            # Group and deduplicate findings per column
             type_counter = {}
+            categories = set()
             sample_quotes = []
 
             for f in findings:
                 it = f.info_type.name if f.info_type else "UNKNOWN"
                 type_counter[it] = type_counter.get(it, 0) + 1
+                category = _categorize_finding(it)
+                categories.add(category)
+                
                 if hasattr(f, "quote") and f.quote:
-                    if f.quote not in sample_quotes:
+                    if f.quote not in sample_quotes and len(sample_quotes) < 3:
                         sample_quotes.append(f.quote)
 
-            # Keep only top 5 samples and unique infoTypes
+            # Store findings with categories
             summary[col]["info_types"] = [f"{t} (x{c})" if c > 1 else t for t, c in sorted(type_counter.items(), key=lambda x: x[1], reverse=True)]
-            summary[col]["samples"] = sample_quotes[:5]
+            summary[col]["samples"] = sample_quotes
+            summary[col]["categories"] = list(categories)
+            summary[col]["primary_category"] = max(categories, key=lambda x: len(x)) if categories else "No Category"
 
-        except gcp_exceptions.GoogleAPICallError as e:
-            # Handle specific API errors (invalid info_type names, region limitations, quota)
-            print(f"❌ Error inspecting column {col}: {e}")
-            traceback.print_exc()
-            # fallback: attempt a small set of common detectors
-            try:
-                fallback_info = [{"name": "EMAIL_ADDRESS"}, {"name": "PHONE_NUMBER"}, {"name": "PERSON_NAME"}]
-                inspect_config = {"include_quote": True, "info_types": fallback_info, "limits": {"max_findings_per_item": 50}}
-                response = client.inspect_content(request={"parent": parent, "inspect_config": inspect_config, "item": item})
-                findings = getattr(response.result, "findings", []) or []
-                for f in findings:
-                    it = f.info_type.name if f.info_type else "UNKNOWN"
-                    quote = f.quote if hasattr(f, "quote") else ""
-                    summary[col]["info_types"].append(it)
-                    if quote:
-                        summary[col]["samples"].append(quote)
-            except Exception:
-                continue
         except Exception as e:
-            print(f"Unexpected DLP error for {col}: {e}")
-            traceback.print_exc()
-    print("✅ DLP inspection completed.")
+            logger.warning(f"DLP inspection failed for {col}: {e}")
+            continue
+    
+    logger.info("✅ Optimized DLP inspection completed")
     return summary

@@ -1,61 +1,128 @@
-import os, io, time
+import os, io, time, traceback
 import pandas as pd
 import pyarrow.parquet as pq
 import fastavro
 from google.cloud import storage
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
-from src.data_profiler.profiler import run_profiling
-from src.data_profiler.dlp_client import inspect_table_dlp
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+from src.data_profiler.profiler import run_profiling_optimized
+from src.data_profiler.dlp_client import inspect_table_dlp_optimized
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 PROJECT_ID = os.getenv("GCP_PROJECT", "custom-plating-475002-j7")
 
-
 app = FastAPI(title="AI + DLP Data Profiler API")
 
-def read_gcs_file(gcs_path: str, sample_rows: int = 200):
-    """Generic reader to load CSV, Parquet, Avro, or ORC files from GCS or local."""
-    if not gcs_path.startswith("gs://"):
-        ext = os.path.splitext(gcs_path)[1].lower()
-        if ext == ".csv":
-            return pd.read_csv(gcs_path).head(sample_rows)
-        elif ext == ".parquet":
-            return pd.read_parquet(gcs_path).head(sample_rows)
-        elif ext == ".avro":
-            with open(gcs_path, "rb") as f:
-                reader = fastavro.reader(f)
-                records = [r for _, r in zip(range(sample_rows), reader)]
-                return pd.DataFrame(records)
-        elif ext == ".orc":
-            return pd.read_orc(gcs_path).head(sample_rows)
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # If file is in GCS
+# Cache for file metadata to avoid repeated GCS calls
+_file_cache = {}
+_CACHE_TIMEOUT = 300  # 5 minutes
+
+async def read_gcs_file_optimized(gcs_path: str, sample_rows: int = 200):
+    """Optimized file reader with streaming and better memory management"""
+    cache_key = f"{gcs_path}_{sample_rows}"
+    if cache_key in _file_cache:
+        if time.time() - _file_cache[cache_key]['timestamp'] < _CACHE_TIMEOUT:
+            return _file_cache[cache_key]['data']
+    
+    if not gcs_path.startswith("gs://"):
+        return _read_local_file(gcs_path, sample_rows)
+    
+    # GCS file processing with streaming
     client = storage.Client()
     bucket_name, blob_path = gcs_path.replace("gs://", "").split("/", 1)
     blob = client.bucket(bucket_name).blob(blob_path)
-    data = blob.download_as_bytes()
     ext = os.path.splitext(blob_path)[1].lower()
-
+    
+    # Get file size to optimize reading strategy
+    blob.reload()
+    file_size = blob.size
+    
     if ext == ".csv":
-        return pd.read_csv(io.BytesIO(data)).head(sample_rows)
+        # For large CSV files, use chunked reading
+        if file_size > 10 * 1024 * 1024:  # 10MB
+            chunks = []
+            stream = blob.open("rb")
+            for i, chunk in enumerate(pd.read_csv(stream, chunksize=1000)):
+                chunks.append(chunk)
+                if len(pd.concat(chunks, ignore_index=True)) >= sample_rows:
+                    break
+            df = pd.concat(chunks, ignore_index=True).head(sample_rows)
+        else:
+            data = await asyncio.get_event_loop().run_in_executor(
+                None, blob.download_as_bytes
+            )
+            df = pd.read_csv(io.BytesIO(data)).head(sample_rows)
+    
     elif ext == ".parquet":
-        table = pq.read_table(io.BytesIO(data))
-        return table.to_pandas().head(sample_rows)
+        # Parquet is columnar - only read needed columns efficiently
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, blob.download_as_bytes
+        )
+        # Use pyarrow to read only metadata first
+        pf = pq.ParquetFile(io.BytesIO(data))
+        df = pf.read().to_pandas().head(sample_rows)
+    
     elif ext == ".avro":
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, blob.download_as_bytes
+        )
         bytes_io = io.BytesIO(data)
         reader = fastavro.reader(bytes_io)
         records = [r for _, r in zip(range(sample_rows), reader)]
-        return pd.DataFrame(records)
-    elif ext == ".orc":
-        return pd.read_orc(io.BytesIO(data)).head(sample_rows)
+        df = pd.DataFrame(records)
+    
     else:
-        raise ValueError(f"Unsupported file type for {gcs_path}")
+        raise ValueError(f"Unsupported file type: {ext}")
+    
+    # Cache the result
+    _file_cache[cache_key] = {
+        'data': df,
+        'timestamp': time.time()
+    }
+    
+    return df
 
+def _read_local_file(file_path: str, sample_rows: int):
+    """Optimized local file reading"""
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext == ".csv":
+        # Use dtype inference and low_memory for large files
+        df = pd.read_csv(file_path, nrows=sample_rows, low_memory=False)
+    elif ext == ".parquet":
+        df = pd.read_parquet(file_path).head(sample_rows)
+    elif ext == ".avro":
+        with open(file_path, "rb") as f:
+            reader = fastavro.reader(f)
+            records = [r for _, r in zip(range(sample_rows), reader)]
+            df = pd.DataFrame(records)
+    elif ext == ".orc":
+        df = pd.read_orc(file_path).head(sample_rows)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+    
+    return df
 
 def make_json_safe(obj):
-    import numpy as np, datetime, numbers, pandas as pd
+    """Optimized JSON serialization"""
+    import numpy as np
+    import datetime
+    import numbers
+    
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -72,16 +139,26 @@ def make_json_safe(obj):
         return None
     return obj
 
-
 @app.post("/profile")
-async def profile(gcs_path: str = Form(...), sample_rows: int = Form(200), parallel: str = Form("true")):
+async def profile(
+    gcs_path: str = Form(...), 
+    sample_rows: int = Form(200), 
+    parallel: str = Form("true")
+):
     start_time = time.time()
     try:
-        print(f"Loading {gcs_path} (sample_rows={sample_rows})")
-        df = read_gcs_file(gcs_path, int(sample_rows))
-        print(f"Loaded {len(df)} rows x {len(df.columns)} cols")
+        logger.info(f"Loading {gcs_path} (sample_rows={sample_rows})")
+        
+        # Use async file reading
+        df = await read_gcs_file_optimized(gcs_path, int(sample_rows))
+        logger.info(f"Loaded {len(df)} rows x {len(df.columns)} cols")
 
-        results = run_profiling(df, project_id=PROJECT_ID, parallel=(str(parallel).lower() in ("true","1","yes")))
+        # Run optimized profiling
+        results = await run_profiling_optimized(
+            df, 
+            project_id=PROJECT_ID, 
+            parallel=(str(parallel).lower() in ("true","1","yes"))
+        )
 
         total_time = round(time.time() - start_time, 2)
         resp = {
@@ -94,14 +171,23 @@ async def profile(gcs_path: str = Form(...), sample_rows: int = Form(200), paral
         return JSONResponse(content=make_json_safe(resp))
 
     except Exception as e:
-        print("ERROR in /profile:", e)
+        logger.error(f"ERROR in /profile: {e}")
         traceback.print_exc()
         return JSONResponse(status_code=500, content={
             "error": str(e),
             "execution_time_sec": round(time.time() - start_time, 2)
         })
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": time.time()}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8080, 
+        workers=1,  # For memory efficiency
+        loop="asyncio"
+    )
