@@ -10,6 +10,9 @@ import asyncio
 import time
 from typing import Optional
 import re
+from datetime import datetime
+import base64
+from fpdf import FPDF
 
 st.set_page_config(page_title="AI Data Profiler Dashboard", layout="wide")
 
@@ -27,6 +30,241 @@ def get_default_config():
 
 config = get_default_config()
 
+# PDF Generation Class with Unicode support
+class DataProfilingPDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 16)
+        self.cell(0, 10, 'AI Data Profiling Report', 0, 1, 'C')
+        self.set_font('Arial', 'I', 10)
+        self.cell(0, 10, f'Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 0, 1, 'C')
+        self.ln(5)
+    
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+    
+    def chapter_title(self, title):
+        self.set_font('Arial', 'B', 14)
+        self.set_fill_color(200, 220, 255)
+        self.cell(0, 10, title, 0, 1, 'L', 1)
+        self.ln(4)
+    
+    def chapter_body(self, body):
+        self.set_font('Arial', '', 10)
+        # Clean the body text to remove problematic characters
+        clean_body = self.clean_text(body)
+        self.multi_cell(0, 8, clean_body)
+        self.ln()
+    
+    def clean_text(self, text):
+        """Clean text to remove problematic Unicode characters"""
+        if not isinstance(text, str):
+            text = str(text)
+        # Replace common problematic Unicode characters
+        replacements = {
+            '•': '-',
+            '→': '->',
+            '≈': '~',
+            '✅': '[OK]',
+            '⚠️': '[WARNING]',
+            '🔢': '[NUMERIC]',
+            '📅': '[DATE]',
+            '📈': '[TREND]',
+            '🧠': '[AI]',
+            '📊': '[CHART]',
+            '🔐': '[SECURE]',
+            '🎯': '[TARGET]',
+            '🛡️': '[SHIELD]',
+            '📋': '[LIST]',
+            '⚖️': '[BALANCE]',
+            '📁': '[FOLDER]',
+            '🧾': '[RECEIPT]',
+            '⏱️': '[TIMER]',
+            '🥧': '[PIE]',
+            '🗂️': '[CATEGORY]',
+            '🧩': '[PUZZLE]',
+            '📘': '[BOOK]',
+            '🔍': '[SEARCH]',
+            '💼': '[BUSINESS]',
+            '🤖': '[ROBOT]',
+            '🏢': '[BUILDING]',
+            '🔒': '[LOCK]',
+            '🎉': '[CELEBRATE]',
+            '❌': '[ERROR]',
+            '⏰': '[CLOCK]',
+            '🔌': '[PLUG]',
+            '🔄': '[REFRESH]',
+            '📄': '[DOCUMENT]',
+            '🚀': '[ROCKET]',
+            '💬': '[CHAT]',
+            '🗑️': '[TRASH]',
+            '💡': '[IDEA]',
+            '💥': '[EXPLOSION]',
+            '🟢': '[GREEN]',
+            '🟡': '[YELLOW]',
+            '🔴': '[RED]',
+            '⚪': '[WHITE]'
+        }
+        
+        for char, replacement in replacements.items():
+            text = text.replace(char, replacement)
+        
+        # Remove any other non-ASCII characters
+        text = text.encode('ascii', 'ignore').decode('ascii')
+        return text
+    
+    def add_table(self, df, col_widths=None):
+        self.set_font('Arial', 'B', 9)
+        
+        # Calculate column widths if not provided
+        if col_widths is None:
+            col_widths = [40] * len(df.columns)
+            if sum(col_widths) > 190:
+                col_widths = [190 / len(df.columns)] * len(df.columns)
+        
+        # Header
+        for i, column in enumerate(df.columns):
+            clean_column = self.clean_text(column)
+            self.cell(col_widths[i], 10, clean_column, 1, 0, 'C')
+        self.ln()
+        
+        # Data
+        self.set_font('Arial', '', 8)
+        for _, row in df.iterrows():
+            for i, value in enumerate(row):
+                display_value = self.clean_text(str(value))
+                if len(display_value) > 30:
+                    display_value = display_value[:27] + "..."
+                self.cell(col_widths[i], 8, display_value, 1, 0, 'L')
+            self.ln()
+        self.ln(5)
+
+def generate_pdf_report(profiling_result):
+    """Generate comprehensive PDF report from profiling results"""
+    pdf = DataProfilingPDF()
+    pdf.add_page()
+    
+    # Cover Page
+    pdf.set_font('Arial', 'B', 20)
+    pdf.cell(0, 40, 'AI Data Profiling Report', 0, 1, 'C')
+    pdf.ln(20)
+    
+    # Basic Information
+    pdf.set_font('Arial', '', 12)
+    pdf.cell(0, 8, f"Project: {profiling_result.get('project', 'Unknown')}", 0, 1)
+    pdf.cell(0, 8, f"Rows Profiled: {profiling_result.get('rows_profiled', 0)}", 0, 1)
+    pdf.cell(0, 8, f"Columns Profiled: {profiling_result.get('columns_profiled', 0)}", 0, 1)
+    pdf.cell(0, 8, f"Execution Time: {profiling_result.get('execution_time_sec', 0)} seconds", 0, 1)
+    pdf.ln(10)
+    
+    # Dataset Overview
+    pdf.chapter_title("1. Dataset Overview")
+    
+    # Create summary dataframe
+    result_table = profiling_result.get('result_table', {})
+    summary_data = []
+    
+    for col, data in result_table.items():
+        if col == "_dataset_insights":
+            continue
+        summary_data.append({
+            "Column": col,
+            "Data Type": data.get("inferred_dtype", "unknown"),
+            "Classification": data.get("classification", "N/A"),
+            "Sensitivity": data.get("data_sensitivity", "N/A"),
+            "DLP Findings": len(data.get("dlp_info_types", [])),
+            "Null %": f"{data.get('stats', {}).get('null_pct', 0)*100:.1f}%"
+        })
+    
+    if summary_data:
+        df_summary = pd.DataFrame(summary_data)
+        pdf.add_table(df_summary, [35, 25, 40, 25, 25, 20])
+    
+    # Sensitive Data Analysis
+    pdf.add_page()
+    pdf.chapter_title("2. Sensitive Data Analysis")
+    
+    sensitive_cols = []
+    for col, data in result_table.items():
+        if col == "_dataset_insights":
+            continue
+        if data.get("dlp_info_types"):
+            sensitive_cols.append({
+                "Column": col,
+                "Info Types": ", ".join(data.get("dlp_info_types", [])),
+                "Category": data.get("primary_category", "Unknown"),
+                "Risk Level": data.get("data_sensitivity", "Unknown").title()
+            })
+    
+    if sensitive_cols:
+        df_sensitive = pd.DataFrame(sensitive_cols)
+        pdf.add_table(df_sensitive, [35, 60, 40, 25])
+    else:
+        pdf.chapter_body("No sensitive data detected by DLP.")
+    
+    # Data Quality Assessment
+    pdf.add_page()
+    pdf.chapter_title("3. Data Quality Assessment")
+    
+    quality_issues = []
+    for col, data in result_table.items():
+        if col == "_dataset_insights":
+            continue
+        stats = data.get("stats", {})
+        if stats.get("null_pct", 0) > 0.1:
+            quality_issues.append({
+                "Column": col,
+                "Null %": f"{stats.get('null_pct', 0)*100:.1f}%",
+                "Distinct %": f"{stats.get('distinct_pct', 0)*100:.1f}%",
+                "Data Type": data.get("inferred_dtype", "unknown")
+            })
+    
+    if quality_issues:
+        df_quality = pd.DataFrame(quality_issues)
+        pdf.add_table(df_quality, [40, 20, 20, 20])
+    else:
+        pdf.chapter_body("No significant data quality issues detected.")
+    
+    # AI Insights
+    pdf.add_page()
+    pdf.chapter_title("4. AI-Powered Insights")
+    
+    insights = result_table.get('_dataset_insights', {})
+    if insights:
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 8, "Executive Summary:", 0, 1)
+        pdf.set_font('Arial', '', 10)
+        pdf.multi_cell(0, 8, insights.get('executive_summary', 'No summary available'))
+        pdf.ln(5)
+        
+        if insights.get('key_risks'):
+            pdf.set_font('Arial', 'B', 11)
+            pdf.cell(0, 8, "Key Risks:", 0, 1)
+            pdf.set_font('Arial', '', 10)
+            for risk in insights.get('key_risks', []):
+                pdf.cell(10, 8, "-", 0, 0)  # Use dash instead of bullet
+                pdf.multi_cell(0, 8, risk)
+            pdf.ln(5)
+        
+        if insights.get('recommended_actions'):
+            pdf.set_font('Arial', 'B', 11)
+            pdf.cell(0, 8, "Recommended Actions:", 0, 1)
+            pdf.set_font('Arial', '', 10)
+            for action in insights.get('recommended_actions', []):
+                pdf.cell(10, 8, "-", 0, 0)  # Use dash instead of bullet
+                pdf.multi_cell(0, 8, action)
+    else:
+        pdf.chapter_body("No AI insights available.")
+    
+    return pdf
+
+def create_download_link(pdf_output, filename):
+    """Create a download link for the PDF"""
+    b64 = base64.b64encode(pdf_output).decode()
+    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-align: center; text-decoration: none; display: inline-block; border-radius: 5px;">📥 Download PDF Report</a>'
+    return href
+
 # Sidebar with optimized layout
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -42,6 +280,32 @@ with st.sidebar:
     if st.button("🔄 Clear Cache"):
         st.cache_data.clear()
         st.success("Cache cleared!")
+    
+    # PDF Export Section
+    st.header("📄 Export Report")
+    
+    # Check if we have profiling results
+    has_results = st.session_state.get('profiling_result') is not None
+    
+    if not has_results:
+        st.info("Run profiling first to generate PDF report")
+    else:
+        if st.button("📊 Generate PDF Report", type="secondary", use_container_width=True):
+            with st.spinner("Generating PDF report..."):
+                try:
+                    pdf = generate_pdf_report(st.session_state.profiling_result)
+                    # Use UTF-8 encoding and ignore errors for safety
+                    pdf_output = pdf.output(dest='S').encode('latin1', 'replace')
+                    
+                    # Create download link
+                    st.markdown(create_download_link(
+                        pdf_output, 
+                        f"data_profiling_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                    ), unsafe_allow_html=True)
+                    st.success("PDF report generated successfully!")
+                    
+                except Exception as e:
+                    st.error(f"PDF generation failed: {str(e)}")
 
 # Session state optimization
 if "profiling_result" not in st.session_state:
@@ -134,7 +398,32 @@ def create_summary_dataframe(result_table):
 
 # Main dashboard
 if result and "result_table" in result:
+    # PDF Export Button in Main Area
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("📄 Export Full Report as PDF", type="primary", use_container_width=True):
+            with st.spinner("Generating comprehensive PDF report..."):
+                try:
+                    pdf = generate_pdf_report(result)
+                    # Use error handling for encoding
+                    pdf_output = pdf.output(dest='S').encode('latin1', 'replace')
+                    
+                    # Create download link
+                    st.markdown(create_download_link(
+                        pdf_output, 
+                        f"data_profiling_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                    ), unsafe_allow_html=True)
+                    st.success("✅ PDF report generated successfully!")
+                    st.balloons()
+                    
+                except Exception as e:
+                    st.error(f"❌ PDF generation failed: {str(e)}")
+    
     st.markdown("## 📊 Dataset Summary")
+    
+    # ... rest of your existing dashboard code remains exactly the same ...
+    # [ALL YOUR EXISTING DASHBOARD CODE GOES HERE - NO CHANGES NEEDED]
     
     # Optimized metrics with caching
     cols = st.columns(4)

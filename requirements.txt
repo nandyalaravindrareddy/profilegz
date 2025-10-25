@@ -46,3 +46,8 @@ openai>=1.0.0
 google-cloud-aiplatform>=1.50.0
 langchain>=0.2.0
 langchain-google-vertexai>=1.0.0
+
+# ───────────────────────────────
+# PDF Generation
+# ───────────────────────────────
+fpdf>=1.7.2
