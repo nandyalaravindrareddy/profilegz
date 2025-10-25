@@ -31,3 +31,18 @@ google-api-core>=2.19.0
 # ───────────────────────────────
 tenacity>=9.0.0
 python-dateutil>=2.9.0.post0
+
+# ───────────────────────────────
+# Advanced Data Processing
+# ───────────────────────────────
+scikit-learn>=1.5.0
+scipy>=1.13.0
+networkx>=3.3
+
+# ───────────────────────────────
+# Enhanced AI/ML Dependencies
+# ───────────────────────────────
+openai>=1.0.0
+google-cloud-aiplatform>=1.50.0
+langchain>=0.2.0
+langchain-google-vertexai>=1.0.0

@@ -10,7 +10,7 @@ python main.py
 
 
 
-cd /Users/swethanandyala/Downloads/hackthon_code/profilegzgz
+cd /Users/swethanandyala/Downloads/hackthon_code/profilegz
 
 /opt/homebrew/bin/python3 -m venv venv
 source venv/bin/activate

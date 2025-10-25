@@ -119,11 +119,14 @@ def create_summary_dataframe(result_table):
     """Efficient dataframe creation"""
     df_summary = []
     for col, data in result_table.items():
+        if col == "_dataset_insights":  # Skip dataset insights in main table
+            continue
         df_summary.append({
             "Column": col,
             "Type": data.get("inferred_dtype", "unknown"),
             "Classification": data.get("classification", "N/A"),
             "Primary Category": data.get("primary_category", "N/A"),
+            "Data Sensitivity": data.get("data_sensitivity", "N/A"),
             "DLP Findings": ", ".join(data.get("dlp_info_types", [])) or "None",
             "Confidence": f"{data.get('overall_confidence', 0.5)*100:.1f}%"
         })
@@ -140,6 +143,39 @@ if result and "result_table" in result:
     cols[2].metric("⏱️ Time (sec)", result["execution_time_sec"])
     cols[3].metric("🧠 Project", result.get("project", "unknown"))
     
+    # NEW: AI-Powered Executive Summary
+    if "_dataset_insights" in result["result_table"]:
+        insights = result["result_table"]["_dataset_insights"]
+        
+        st.markdown("### 🧠 AI-Powered Insights")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if "executive_summary" in insights:
+                st.markdown("#### 📋 Executive Summary")
+                st.info(insights["executive_summary"])
+            
+            if "key_risks" in insights:
+                st.markdown("#### ⚠️ Key Risks")
+                for risk in insights["key_risks"][:3]:
+                    st.markdown(f"- {risk}")
+        
+        with col2:
+            if "recommended_actions" in insights:
+                st.markdown("#### 🎯 Recommended Actions")
+                for action in insights["recommended_actions"][:3]:
+                    st.markdown(f"- {action}")
+            
+            # Quality and risk scores
+            cols_insights = st.columns(2)
+            if "data_quality_score" in insights:
+                cols_insights[0].metric("📈 Data Quality Score", f"{insights['data_quality_score']*100:.0f}%")
+            if "privacy_risk_level" in insights:
+                risk_level = insights['privacy_risk_level']
+                color = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
+                cols_insights[1].metric("🛡️ Privacy Risk", f"{color} {risk_level.title()}")
+    
     # Create summary dataframe
     df_summary = create_summary_dataframe(result["result_table"])
     
@@ -148,6 +184,8 @@ if result and "result_table" in result:
     
     dtype_counts = {}
     for col, data in result["result_table"].items():
+        if col == "_dataset_insights":  # Skip dataset insights
+            continue
         dtype = data.get("inferred_dtype", "unknown")
         dtype_counts[dtype] = dtype_counts.get(dtype, 0) + 1
     
@@ -185,6 +223,8 @@ if result and "result_table" in result:
     # Collect all DLP findings with their categories
     dlp_findings = []
     for col, data in result["result_table"].items():
+        if col == "_dataset_insights":  # Skip dataset insights
+            continue
         categories = data.get("categories", [])
         info_types = data.get("dlp_info_types", [])
         
@@ -283,12 +323,15 @@ if result and "result_table" in result:
         st.markdown("#### 🗂️ Column-Level Classification")
         category_data = []
         for col, data in result["result_table"].items():
+            if col == "_dataset_insights":  # Skip dataset insights
+                continue
             if data.get("dlp_info_types"):
                 category_data.append({
                     "Column": col,
                     "Primary Category": data.get("primary_category", "Unknown"),
                     "InfoTypes": ", ".join(data.get("dlp_info_types", [])),
-                    "Data Type": data.get("inferred_dtype", "unknown")
+                    "Data Type": data.get("inferred_dtype", "unknown"),
+                    "Sensitivity": data.get("data_sensitivity", "N/A")
                 })
         
         if category_data:
@@ -303,28 +346,79 @@ if result and "result_table" in result:
     st.divider()
     st.subheader("📘 Column-Level Analysis")
 
-    col_names = list(result["result_table"].keys())
+    # Filter out dataset insights from column selection
+    col_names = [col for col in result["result_table"].keys() if col != "_dataset_insights"]
     selected_col = st.selectbox("Select a column for detailed profiling", col_names)
 
     if selected_col:
         col_data = result["result_table"][selected_col]
 
         st.markdown(f"### 🔍 Column: `{selected_col}`")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("📘 Data Type", col_data.get("inferred_dtype", "unknown"))
         c2.metric("🏷️ Classification", col_data.get("classification", "Not detected"))
         c3.metric("📂 Primary Category", col_data.get("primary_category", "N/A"))
+        c4.metric("🔒 Sensitivity", col_data.get("data_sensitivity", "N/A").title())
 
         st.markdown("#### 💼 Business Insights")
         insights = interpret_stats(col_data.get("stats", {}))
         for i in insights:
             st.markdown(f"- {i}")
 
+        # NEW: AI-Powered Analysis
+        st.markdown("#### 🤖 AI-Powered Analysis")
+        
+        ai_classification = col_data.get("ai_classification", {})
+        
+        if ai_classification and not isinstance(ai_classification, str):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                business_class = ai_classification.get("business_classification", "Not classified")
+                st.metric("🏢 Business Role", business_class)
+            
+            with col2:
+                sensitivity = ai_classification.get("data_sensitivity", "low").title()
+                st.metric("🔒 Sensitivity", sensitivity)
+            
+            with col3:
+                privacy_risk = ai_classification.get("privacy_risk", "low").title()
+                st.metric("🛡️ Privacy Risk", privacy_risk)
+            
+            # Governance policies
+            if "suggested_governance_policies" in ai_classification:
+                with st.expander("📋 Suggested Governance Policies"):
+                    for policy in ai_classification["suggested_governance_policies"]:
+                        st.markdown(f"- {policy}")
+            
+            # Compliance considerations
+            if "compliance_considerations" in ai_classification and ai_classification["compliance_considerations"] != ["none"]:
+                with st.expander("⚖️ Compliance Considerations"):
+                    for compliance in ai_classification["compliance_considerations"]:
+                        st.markdown(f"- {compliance}")
+        
+        # AI-Enhanced Quality Rules
+        ai_rules = col_data.get("ai_enhanced_rules", [])
+        if ai_rules:
+            st.markdown("#### 🎯 AI-Generated Quality Rules")
+            for rule in ai_rules[:5]:  # Show top 5 rules
+                confidence = rule.get('confidence', 0)
+                rule_type = rule.get('type', 'general')
+                confidence_color = "green" if confidence > 0.8 else "orange" if confidence > 0.6 else "red"
+                
+                st.markdown(
+                    f"- **{rule['rule']}** "
+                    f"<span style='color: {confidence_color}; font-weight: bold;'>({confidence*100:.0f}% confidence)</span> "
+                    f"`{rule_type}`",
+                    unsafe_allow_html=True
+                )
+
         st.markdown("#### 🧩 Profiling Rules")
         rules = col_data.get("rules", [])
         if rules:
             for rule in rules:
-                st.markdown(f"- {rule.get('rule')} (confidence: {rule.get('confidence')})")
+                confidence = rule.get('confidence', 0.5)
+                st.markdown(f"- {rule.get('rule')} (confidence: {confidence:.1%})")
         else:
             st.info("No profiling rules available.")
 
@@ -397,15 +491,19 @@ else:
                 vertexai.init(project=project_id, location="us-central1")
                 model = GenerativeModel("gemini-2.5-flash")
                 
-                # Create context from current profiling results
+                # Enhanced context from current profiling results
                 sensitive_columns = [
                     col for col, data in profiling_result.get('result_table', {}).items() 
-                    if data.get('dlp_info_types')
+                    if col != "_dataset_insights" and data.get('dlp_info_types')
                 ]
+                
                 data_quality_issues = [
                     col for col, data in profiling_result.get('result_table', {}).items()
-                    if data.get('stats', {}).get('null_pct', 0) > 0.1
+                    if col != "_dataset_insights" and data.get('stats', {}).get('null_pct', 0) > 0.1
                 ]
+                
+                # Get AI insights if available
+                ai_insights = profiling_result.get('result_table', {}).get('_dataset_insights', {})
                 
                 context = f"""
                 You are a data profiling expert analyzing this dataset:
@@ -415,8 +513,11 @@ else:
                 - Sensitive columns found: {len(sensitive_columns)} ({', '.join(sensitive_columns[:5])}{'...' if len(sensitive_columns) > 5 else ''})
                 - Data quality issues: {len(data_quality_issues)} columns with >10% nulls
                 - Execution time: {profiling_result.get('execution_time_sec', 0)} seconds
+                - AI Insights: {ai_insights.get('executive_summary', 'No AI insights available')}
+                - Key Risks: {', '.join(ai_insights.get('key_risks', ['No risks identified']))}
+                - Recommended Actions: {', '.join(ai_insights.get('recommended_actions', ['No specific recommendations']))}
                 
-                Provide specific, actionable insights based on the actual profiling results.
+                Provide specific, actionable insights based on the actual profiling results and AI analysis.
                 """
                 
                 prompt = f"{context}\n\nQuestion: {user_input}"

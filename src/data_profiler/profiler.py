@@ -3,8 +3,14 @@ import pandas as pd, numpy as np
 import asyncio
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
+from typing import Dict, List, Any  # ADD THIS IMPORT
 from .dlp_client import inspect_table_dlp_optimized
-from .vertex_client import call_llm_for_columns_optimized
+from .vertex_client import (
+    call_llm_for_columns_optimized, 
+    generate_data_quality_rules_ai,
+    generate_column_classification_ai,
+    generate_dataset_summary_ai
+)
 import numbers, datetime
 from functools import lru_cache
 import logging
@@ -107,6 +113,17 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
 
     return {"dtype": dtype, "stats": stats}
 
+async def generate_ai_enhanced_rules(series: pd.Series, col_name: str, basic_stats: Dict):
+    """Generate AI-enhanced data quality rules"""
+    sample_values = series.dropna().astype(str).head(20).tolist()
+    
+    try:
+        ai_rules = await generate_data_quality_rules_ai(col_name, sample_values, basic_stats)
+        return ai_rules.get("quality_rules", [])
+    except Exception as e:
+        logger.warning(f"AI rule generation failed for {col_name}: {e}")
+        return []
+
 def local_rules_optimized(series: pd.Series):
     """Optimized rule generation with reduced operations"""
     n = len(series)
@@ -164,20 +181,25 @@ def local_rules_optimized(series: pd.Series):
     return rules
 
 def _enhance_classification(col_data: dict) -> str:
-    """Enhanced classification logic"""
-    # Priority 1: DLP findings
+    """Enhanced classification logic with AI prioritization"""
+    # Priority 1: AI classification if available
+    ai_classification = col_data.get("ai_classification", {})
+    if isinstance(ai_classification, dict) and ai_classification.get("business_classification"):
+        return ai_classification["business_classification"]
+    
+    # Priority 2: DLP findings
     dlp_types = col_data.get("dlp_info_types", [])
     if dlp_types:
         # Extract primary info type from DLP
         primary_dlp = dlp_types[0].split(' (x')[0]  # Remove count
         return primary_dlp
     
-    # Priority 2: LLM classification
+    # Priority 3: LLM classification
     llm_output = col_data.get("llm_output", {})
     if isinstance(llm_output, dict) and llm_output.get("classification"):
         return llm_output["classification"]
     
-    # Priority 3: Data type based classification
+    # Priority 4: Data type based classification
     dtype = col_data.get("inferred_dtype", "unknown")
     stats = col_data.get("stats", {})
     
@@ -195,7 +217,7 @@ def _enhance_classification(col_data: dict) -> str:
 
 async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: bool = True, max_workers: int = 4):
     """
-    Optimized profiling orchestrator with async operations and batching
+    Optimized profiling orchestrator with enhanced AI integration
     """
     start = time.time()
     columns = list(df.columns)
@@ -219,7 +241,8 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
                         "inferred_dtype": prof["dtype"],
                         "stats": prof["stats"],
                         "rules": rules,
-                        "classification": None
+                        "classification": None,
+                        "ai_enhanced_rules": []
                     }
                 except Exception as e:
                     logger.warning(f"Profiling error for {col}: {e}")
@@ -227,7 +250,8 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
                         "inferred_dtype": "string",
                         "stats": {"null_pct": 1.0},
                         "rules": [],
-                        "classification": None
+                        "classification": None,
+                        "ai_enhanced_rules": []
                     }
     else:
         # Sequential fallback
@@ -237,7 +261,8 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
                 "inferred_dtype": prof["dtype"],
                 "stats": prof["stats"],
                 "rules": local_rules_optimized(df[col]),
-                "classification": None
+                "classification": None,
+                "ai_enhanced_rules": []
             }
     
     # Phase 2: Async DLP inspection
@@ -255,7 +280,48 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
             results[col]["categories"] = meta.get("categories", [])
             results[col]["primary_category"] = meta.get("primary_category", "No Category")
     
-    # Phase 3: Optimized LLM enrichment (batched)
+    # Phase 3: AI-enhanced classification and rules
+    ai_tasks = []
+    for col, data in results.items():
+        if len(df) <= 1000:  # Limit AI processing for larger datasets
+            sample_values = df[col].dropna().astype(str).head(15).tolist()
+            basic_stats = data.get("stats", {})
+            
+            # Create AI classification task
+            ai_tasks.append(
+                generate_column_classification_ai(col, sample_values, basic_stats)
+            )
+        else:
+            ai_tasks.append(asyncio.sleep(0))  # Placeholder
+    
+    # Execute AI classification tasks
+    try:
+        ai_results = await asyncio.gather(*ai_tasks, return_exceptions=True)
+        for i, (col, ai_result) in enumerate(zip(results.keys(), ai_results)):
+            if not isinstance(ai_result, Exception) and isinstance(ai_result, dict):
+                results[col]["ai_classification"] = ai_result
+    except Exception as e:
+        logger.warning(f"AI classification batch failed: {e}")
+    
+    # Phase 4: AI-enhanced quality rules for key columns
+    key_columns = [col for col in columns if results[col].get("dlp_info_types") or results[col].get("stats", {}).get("distinct_pct", 0) == 1]
+    
+    if key_columns and len(df) <= 500:
+        rule_tasks = []
+        for col in key_columns:
+            rule_tasks.append(
+                generate_ai_enhanced_rules(df[col], col, results[col].get("stats", {}))
+            )
+        
+        try:
+            rule_results = await asyncio.gather(*rule_tasks, return_exceptions=True)
+            for i, (col, rule_result) in enumerate(zip(key_columns, rule_results)):
+                if not isinstance(rule_result, Exception) and isinstance(rule_result, list):
+                    results[col]["ai_enhanced_rules"] = rule_result
+        except Exception as e:
+            logger.warning(f"AI rule generation failed: {e}")
+    
+    # Phase 5: Optimized LLM enrichment (batched)
     text_cols = [
         c for c, v in results.items() 
         if (v["inferred_dtype"] == "string" and 
@@ -280,11 +346,31 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
     # Enhanced classification after all processing
     for col, meta in results.items():
         meta["classification"] = _enhance_classification(meta)
+        
+        # Add AI-derived sensitivity if available
+        ai_class = meta.get("ai_classification", {})
+        if isinstance(ai_class, dict):
+            meta["data_sensitivity"] = ai_class.get("data_sensitivity", "low")
+            meta["privacy_risk"] = ai_class.get("privacy_risk", "low")
+    
+    # Phase 6: Generate dataset-level AI insights
+    try:
+        dataset_insights = await generate_dataset_summary_ai(results)
+        results["_dataset_insights"] = dataset_insights
+    except Exception as e:
+        logger.warning(f"Dataset-level AI insights failed: {e}")
+        results["_dataset_insights"] = {"executive_summary": "AI analysis unavailable"}
     
     # Final confidence calculation
     for c, meta in results.items():
+        if c == "_dataset_insights":
+            continue
+            
         confs = [r.get("confidence", 0.5) for r in meta.get("rules", []) if isinstance(r, dict)]
-        meta["overall_confidence"] = round(float(sum(confs)/len(confs)) if confs else 0.5, 3)
+        ai_confs = [r.get("confidence", 0.5) for r in meta.get("ai_enhanced_rules", []) if isinstance(r, dict)]
+        
+        all_confs = confs + ai_confs
+        meta["overall_confidence"] = round(float(sum(all_confs)/len(all_confs)) if all_confs else 0.5, 3)
     
     total_time = round(time.time() - start, 2)
     logger.info(f"Profiling finished in {total_time}s")
