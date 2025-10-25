@@ -30,7 +30,7 @@ def get_default_config():
 
 config = get_default_config()
 
-# PDF Generation Class with Unicode support
+# PDF Generation Class
 class DataProfilingPDF(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 16)
@@ -52,7 +52,6 @@ class DataProfilingPDF(FPDF):
     
     def chapter_body(self, body):
         self.set_font('Arial', '', 10)
-        # Clean the body text to remove problematic characters
         clean_body = self.clean_text(body)
         self.multi_cell(0, 8, clean_body)
         self.ln()
@@ -61,6 +60,7 @@ class DataProfilingPDF(FPDF):
         """Clean text to remove problematic Unicode characters"""
         if not isinstance(text, str):
             text = str(text)
+        
         # Replace common problematic Unicode characters
         replacements = {
             '•': '-',
@@ -294,7 +294,7 @@ with st.sidebar:
             with st.spinner("Generating PDF report..."):
                 try:
                     pdf = generate_pdf_report(st.session_state.profiling_result)
-                    # Use UTF-8 encoding and ignore errors for safety
+                    # Use error handling for encoding
                     pdf_output = pdf.output(dest='S').encode('latin1', 'replace')
                     
                     # Create download link
@@ -421,9 +421,6 @@ if result and "result_table" in result:
                     st.error(f"❌ PDF generation failed: {str(e)}")
     
     st.markdown("## 📊 Dataset Summary")
-    
-    # ... rest of your existing dashboard code remains exactly the same ...
-    # [ALL YOUR EXISTING DASHBOARD CODE GOES HERE - NO CHANGES NEEDED]
     
     # Optimized metrics with caching
     cols = st.columns(4)
@@ -780,33 +777,75 @@ else:
                 vertexai.init(project=project_id, location="us-central1")
                 model = GenerativeModel("gemini-2.5-flash")
                 
-                # Enhanced context from current profiling results
-                sensitive_columns = [
-                    col for col, data in profiling_result.get('result_table', {}).items() 
-                    if col != "_dataset_insights" and data.get('dlp_info_types')
-                ]
+                # ENHANCED CONTEXT: Use actual classification data from profiling results
+                result_table = profiling_result.get('result_table', {})
                 
-                data_quality_issues = [
-                    col for col, data in profiling_result.get('result_table', {}).items()
-                    if col != "_dataset_insights" and data.get('stats', {}).get('null_pct', 0) > 0.1
-                ]
+                # Build comprehensive classification summary
+                classification_summary = {}
+                sensitive_columns_by_type = {}
+                column_details = []
+                
+                for col, data in result_table.items():
+                    if col == "_dataset_insights":
+                        continue
+                    
+                    classification = data.get("classification", "Unknown")
+                    primary_category = data.get("primary_category", "Unknown")
+                    data_type = data.get("inferred_dtype", "unknown")
+                    sensitivity = data.get("data_sensitivity", "low")
+                    dlp_findings = data.get("dlp_info_types", [])
+                    
+                    # Count classifications
+                    classification_summary[classification] = classification_summary.get(classification, 0) + 1
+                    
+                    # Group sensitive columns by type
+                    if dlp_findings or sensitivity in ["medium", "high"]:
+                        if classification not in sensitive_columns_by_type:
+                            sensitive_columns_by_type[classification] = []
+                        sensitive_columns_by_type[classification].append(col)
+                    
+                    # Store column details
+                    column_details.append({
+                        "column": col,
+                        "classification": classification,
+                        "primary_category": primary_category,
+                        "data_type": data_type,
+                        "sensitivity": sensitivity,
+                        "dlp_findings": dlp_findings
+                    })
                 
                 # Get AI insights if available
-                ai_insights = profiling_result.get('result_table', {}).get('_dataset_insights', {})
+                ai_insights = result_table.get('_dataset_insights', {})
                 
+                # Build enhanced context
                 context = f"""
-                You are a data profiling expert analyzing this dataset:
-                
+                You are a data profiling expert analyzing this dataset. Use the ACTUAL profiling results below to answer questions accurately.
+
+                DATASET PROFILE RESULTS:
                 - Project: {profiling_result.get('project', 'Unknown')}
                 - Dataset: {profiling_result.get('rows_profiled', 0)} rows, {profiling_result.get('columns_profiled', 0)} columns
-                - Sensitive columns found: {len(sensitive_columns)} ({', '.join(sensitive_columns[:5])}{'...' if len(sensitive_columns) > 5 else ''})
-                - Data quality issues: {len(data_quality_issues)} columns with >10% nulls
                 - Execution time: {profiling_result.get('execution_time_sec', 0)} seconds
-                - AI Insights: {ai_insights.get('executive_summary', 'No AI insights available')}
+
+                ACTUAL DATA CLASSIFICATIONS FOUND:
+                {json.dumps(classification_summary, indent=2)}
+
+                SENSITIVE COLUMNS BY TYPE:
+                {json.dumps(sensitive_columns_by_type, indent=2)}
+
+                DETAILED COLUMN INFORMATION (first 10 columns):
+                {json.dumps(column_details[:10], indent=2)}
+
+                AI INSIGHTS:
+                - Executive Summary: {ai_insights.get('executive_summary', 'No summary available')}
                 - Key Risks: {', '.join(ai_insights.get('key_risks', ['No risks identified']))}
                 - Recommended Actions: {', '.join(ai_insights.get('recommended_actions', ['No specific recommendations']))}
-                
-                Provide specific, actionable insights based on the actual profiling results and AI analysis.
+
+                IMPORTANT: When answering questions about data classifications, use the ACTUAL classification types found in the profiling results above. 
+                Do not make up generic PII/SPII categories unless they match the actual classifications found.
+
+                Common classification types in this dataset include: {', '.join(classification_summary.keys())}
+
+                Be specific and reference the actual column names and their classifications.
                 """
                 
                 prompt = f"{context}\n\nQuestion: {user_input}"

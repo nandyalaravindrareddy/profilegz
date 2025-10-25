@@ -3,8 +3,8 @@ import pandas as pd, numpy as np
 import asyncio
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
-from typing import Dict, List, Any  # ADD THIS IMPORT
-from .dlp_client import inspect_table_dlp_optimized
+from typing import Dict, List, Any
+from .dlp_client import enhance_dlp_findings_with_genai, inspect_table_dlp_optimized
 from .vertex_client import (
     call_llm_for_columns_optimized, 
     generate_data_quality_rules_ai,
@@ -181,39 +181,74 @@ def local_rules_optimized(series: pd.Series):
     return rules
 
 def _enhance_classification(col_data: dict) -> str:
-    """Enhanced classification logic with AI prioritization"""
-    # Priority 1: AI classification if available
+    """Enhanced classification logic with AI prioritization - FIXED"""
+    
+    # Debug logging to see what's available
+    col_name = col_data.get('debug_name', 'unknown')
+    logger.info(f"🔍 Classification data for column: {col_name}")
+    logger.info(f"  - primary_category: {col_data.get('primary_category')}")
+    logger.info(f"  - business_context: {col_data.get('business_context')}")
+    logger.info(f"  - dlp_info_types: {col_data.get('dlp_info_types', [])}")
+    logger.info(f"  - ai_classification type: {type(col_data.get('ai_classification'))}")
+    
+    # Priority 1: Use primary_category from DLP AI classification (this is what's actually populated)
+    primary_category = col_data.get("primary_category")
+    if primary_category and primary_category not in ["No Category", "Unknown", "Other"]:
+        logger.info(f"✅ Using primary_category: {primary_category}")
+        return primary_category
+    
+    # Priority 2: Use business_context from DLP AI classification
+    business_context = col_data.get("business_context", "")
+    if business_context and business_context not in ["Unknown", "Fallback Classification", "Classification Failed"]:
+        logger.info(f"✅ Using business_context: {business_context}")
+        # Extract meaningful classification from business_context
+        if "classified as" in business_context.lower():
+            # Extract the classification from phrases like "Classified as Personal Identifiers based on..."
+            match = re.search(r"classified as ([^,.]+)", business_context, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return business_context
+    
+    # Priority 3: Use AI classification from separate Vertex AI call
     ai_classification = col_data.get("ai_classification", {})
-    if isinstance(ai_classification, dict) and ai_classification.get("business_classification"):
-        return ai_classification["business_classification"]
+    if isinstance(ai_classification, dict):
+        business_class = ai_classification.get("business_classification")
+        if business_class and business_class != "Unknown":
+            logger.info(f"✅ Using ai_classification: {business_class}")
+            return business_class
     
-    # Priority 2: DLP findings
-    dlp_types = col_data.get("dlp_info_types", [])
-    if dlp_types:
+    # Priority 4: Use DLP info types if available
+    dlp_info_types = col_data.get("dlp_info_types", [])
+    if dlp_info_types:
         # Extract primary info type from DLP
-        primary_dlp = dlp_types[0].split(' (x')[0]  # Remove count
-        return primary_dlp
+        primary_dlp = dlp_info_types[0].split(' (x')[0]  # Remove count
+        logger.info(f"✅ Using DLP info type: {primary_dlp}")
+        return f"DLP: {primary_dlp}"
     
-    # Priority 3: LLM classification
+    # Priority 5: Use LLM classification if available
     llm_output = col_data.get("llm_output", {})
     if isinstance(llm_output, dict) and llm_output.get("classification"):
+        logger.info(f"✅ Using LLM output: {llm_output.get('classification')}")
         return llm_output["classification"]
     
-    # Priority 4: Data type based classification
+    # Priority 6: Data type based classification
     dtype = col_data.get("inferred_dtype", "unknown")
     stats = col_data.get("stats", {})
     
     if dtype == "date":
-        return "Temporal Data"
+        classification = "Temporal Data"
     elif dtype in ["int", "float"]:
         if stats.get("distinct_pct", 0) == 1:
-            return "Unique Identifier"
+            classification = "Unique Identifier"
         else:
-            return "Numeric Data"
+            classification = "Numeric Data"
     elif dtype == "boolean":
-        return "Boolean Flag"
+        classification = "Boolean Flag"
     else:
-        return "Text Data"
+        classification = "Text Data"
+    
+    logger.info(f"✅ Using dtype-based classification: {classification}")
+    return classification
 
 async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: bool = True, max_workers: int = 4):
     """
@@ -265,20 +300,29 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
                 "ai_enhanced_rules": []
             }
     
-    # Phase 2: Async DLP inspection
+    # Add debug names for classification tracking
+    for col, meta in results.items():
+        meta["debug_name"] = col
+    
+    # Phase 2: AI-enhanced DLP inspection
     try:
-        dlp_summary = await inspect_table_dlp_optimized(project_id, df)
+        dlp_summary = await enhance_dlp_findings_with_genai(project_id, df)
     except Exception as e:
         logger.error(f"DLP failed: {e}")
         dlp_summary = {c: {"info_types": [], "samples": [], "categories": []} for c in columns}
     
-    # Merge DLP results
+    # Merge DLP results with AI enhancements
     for col, meta in dlp_summary.items():
         if col in results:
             results[col]["dlp_info_types"] = meta.get("info_types", [])
             results[col]["dlp_samples"] = meta.get("samples", [])
             results[col]["categories"] = meta.get("categories", [])
             results[col]["primary_category"] = meta.get("primary_category", "No Category")
+            results[col]["risk_level"] = meta.get("risk_level", "low")
+            results[col]["business_context"] = meta.get("business_context", "Unknown")
+            results[col]["compliance_considerations"] = meta.get("compliance_considerations", [])
+            results[col]["recommended_handling"] = meta.get("recommended_handling", "standard")
+            results[col]["confidence_score"] = meta.get("confidence_score", 0.5)
     
     # Phase 3: AI-enhanced classification and rules
     ai_tasks = []
@@ -345,13 +389,21 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
     
     # Enhanced classification after all processing
     for col, meta in results.items():
+        if col == "_dataset_insights":
+            continue
+        logger.info(f"🎯 Final classification for {col}:")
         meta["classification"] = _enhance_classification(meta)
+        logger.info(f"🎯 Result: {meta['classification']}")
         
         # Add AI-derived sensitivity if available
         ai_class = meta.get("ai_classification", {})
         if isinstance(ai_class, dict):
             meta["data_sensitivity"] = ai_class.get("data_sensitivity", "low")
             meta["privacy_risk"] = ai_class.get("privacy_risk", "low")
+        else:
+            # Use DLP AI classification
+            meta["data_sensitivity"] = meta.get("risk_level", "low")
+            meta["privacy_risk"] = meta.get("risk_level", "low")
     
     # Phase 6: Generate dataset-level AI insights
     try:
