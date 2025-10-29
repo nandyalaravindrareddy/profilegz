@@ -16,8 +16,8 @@ from fpdf import FPDF
 
 st.set_page_config(page_title="AI Data Profiler Dashboard", layout="wide")
 
-st.title("🧠 AI + DLP Data Profiling Dashboard")
-st.caption("Automated data discovery, classification, and profiling powered by Google Cloud DLP & Gemini AI")
+st.title("🧠 AI-Powered Data Profiling Dashboard")
+st.caption("Automated data discovery and classification powered by Google Cloud DLP & Gemini AI")
 
 # Configuration with caching
 @st.cache_data(ttl=3600)
@@ -181,7 +181,7 @@ def generate_pdf_report(profiling_result):
         df_summary = pd.DataFrame(summary_data)
         pdf.add_table(df_summary, [35, 25, 40, 25, 25, 20])
     
-    # Enhanced: Numeric Data Analysis
+    # Numeric Data Analysis
     pdf.add_page()
     pdf.chapter_title("2. Numeric Data Analysis")
     
@@ -218,7 +218,7 @@ def generate_pdf_report(profiling_result):
             sensitive_cols.append({
                 "Column": col,
                 "Info Types": ", ".join(data.get("dlp_info_types", [])),
-                "Category": data.get("primary_category", "Unknown"),
+                "Category": data.get("classification", "Unknown"),
                 "Risk Level": data.get("data_sensitivity", "Unknown").title()
             })
     
@@ -268,7 +268,7 @@ def generate_pdf_report(profiling_result):
             pdf.cell(0, 8, "Key Risks:", 0, 1)
             pdf.set_font('Arial', '', 10)
             for risk in insights.get('key_risks', []):
-                pdf.cell(10, 8, "-", 0, 0)  # Use dash instead of bullet
+                pdf.cell(10, 8, "-", 0, 0)
                 pdf.multi_cell(0, 8, risk)
             pdf.ln(5)
         
@@ -277,7 +277,7 @@ def generate_pdf_report(profiling_result):
             pdf.cell(0, 8, "Recommended Actions:", 0, 1)
             pdf.set_font('Arial', '', 10)
             for action in insights.get('recommended_actions', []):
-                pdf.cell(10, 8, "-", 0, 0)  # Use dash instead of bullet
+                pdf.cell(10, 8, "-", 0, 0)
                 pdf.multi_cell(0, 8, action)
     else:
         pdf.chapter_body("No AI insights available.")
@@ -319,7 +319,6 @@ with st.sidebar:
             with st.spinner("Generating PDF report..."):
                 try:
                     pdf = generate_pdf_report(st.session_state.profiling_result)
-                    # Use error handling for encoding
                     pdf_output = pdf.output(dest='S').encode('latin1', 'replace')
                     
                     # Create download link
@@ -350,7 +349,7 @@ def should_process_request():
 if run_btn and should_process_request():
     st.session_state.last_request = time.time()
     
-    with st.spinner("🚀 Profiling data... This may take a few moments"):
+    with st.spinner("🚀 Profiling data with GenAI... This may take a few moments"):
         try:
             resp = requests.post(
                 BACKEND_URL, 
@@ -364,7 +363,7 @@ if run_btn and should_process_request():
             
             if resp.status_code == 200:
                 st.session_state.profiling_result = resp.json()
-                st.success("✅ Profiling completed successfully!")
+                st.success("✅ AI-Powered Profiling completed successfully!")
             else:
                 st.error(f"❌ Backend Error ({resp.status_code}): {resp.text}")
                 
@@ -397,7 +396,7 @@ def interpret_stats(stats):
     elif stats.get("distinct_pct") is not None:
         insights.append(f"🔢 {stats['distinct_pct'] * 100:.1f}% unique values")
     
-    # ENHANCED: Numeric statistics display
+    # Numeric statistics display
     if "min" in stats and "max" in stats:
         insights.append(f"📊 Range: {stats['min']:.2f} → {stats['max']:.2f}")
     if "mean" in stats:
@@ -421,17 +420,20 @@ def interpret_stats(stats):
 
 @st.cache_data
 def create_summary_dataframe(result_table):
-    """Efficient dataframe creation"""
+    """Efficient dataframe creation with simplified classification"""
     df_summary = []
     for col, data in result_table.items():
-        if col == "_dataset_insights":  # Skip dataset insights in main table
+        if col == "_dataset_insights":
             continue
+        
+        # Use only the main classification
+        classification = data.get("classification", "N/A")
+        
         df_summary.append({
             "Column": col,
             "Type": data.get("inferred_dtype", "unknown"),
-            "Classification": data.get("classification", "N/A"),
-            "Primary Category": data.get("primary_category", "N/A"),
-            "Data Sensitivity": data.get("data_sensitivity", "N/A"),
+            "Classification": classification,
+            "Sensitivity": data.get("data_sensitivity", "N/A").title(),
             "DLP Findings": ", ".join(data.get("dlp_info_types", [])) or "None",
             "Confidence": f"{data.get('overall_confidence', 0.5)*100:.1f}%"
         })
@@ -447,7 +449,6 @@ if result and "result_table" in result:
             with st.spinner("Generating comprehensive PDF report..."):
                 try:
                     pdf = generate_pdf_report(result)
-                    # Use error handling for encoding
                     pdf_output = pdf.output(dest='S').encode('latin1', 'replace')
                     
                     # Create download link
@@ -461,20 +462,20 @@ if result and "result_table" in result:
                 except Exception as e:
                     st.error(f"❌ PDF generation failed: {str(e)}")
     
-    st.markdown("## 📊 Dataset Summary")
+    st.markdown("## 🧠 AI-Powered Dataset Summary")
     
-    # Optimized metrics with caching
+    # Enhanced metrics with AI insights
     cols = st.columns(4)
     cols[0].metric("📁 Columns", result["columns_profiled"])
     cols[1].metric("🧾 Rows", result["rows_profiled"])
     cols[2].metric("⏱️ Time (sec)", result["execution_time_sec"])
-    cols[3].metric("🧠 Project", result.get("project", "unknown"))
+    cols[3].metric("🤖 AI Model", "Gemini 1.5 Flash")
     
-    # NEW: AI-Powered Executive Summary
+    # AI-Powered Executive Summary
     if "_dataset_insights" in result["result_table"]:
         insights = result["result_table"]["_dataset_insights"]
         
-        st.markdown("### 🧠 AI-Powered Insights")
+        st.markdown("### 💡 AI-Generated Insights")
         
         col1, col2 = st.columns(2)
         
@@ -497,96 +498,138 @@ if result and "result_table" in result:
             # Quality and risk scores
             cols_insights = st.columns(2)
             if "data_quality_score" in insights:
-                cols_insights[0].metric("📈 Data Quality Score", f"{insights['data_quality_score']*100:.0f}%")
+                cols_insights[0].metric("📈 Data Quality", f"{insights['data_quality_score']*100:.0f}%")
             if "privacy_risk_level" in insights:
                 risk_level = insights['privacy_risk_level']
                 color = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
                 cols_insights[1].metric("🛡️ Privacy Risk", f"{color} {risk_level.title()}")
     
-    # Create summary dataframe
+    # Create enhanced summary dataframe
     df_summary = create_summary_dataframe(result["result_table"])
     
-    # Data type distribution with error handling
-    st.markdown("### 🥧 Data Type Distribution")
+    # Enhanced Data Type Distribution
+    st.markdown("### 🥧 Data Type & Classification Distribution")
     
-    dtype_counts = {}
-    for col, data in result["result_table"].items():
-        if col == "_dataset_insights":  # Skip dataset insights
-            continue
-        dtype = data.get("inferred_dtype", "unknown")
-        dtype_counts[dtype] = dtype_counts.get(dtype, 0) + 1
+    col1, col2 = st.columns(2)
     
-    if dtype_counts:
-        dtype_df = pd.DataFrame(
-            list(dtype_counts.items()), 
-            columns=["Data Type", "Count"]
-        ).sort_values("Count", ascending=False)
+    with col1:
+        # Data Type Distribution
+        dtype_counts = {}
+        for col, data in result["result_table"].items():
+            if col == "_dataset_insights":
+                continue
+            dtype = data.get("inferred_dtype", "unknown")
+            dtype_counts[dtype] = dtype_counts.get(dtype, 0) + 1
         
-        fig_dtype = px.pie(
-            dtype_df,
-            names="Data Type",
-            values="Count",
-            color="Data Type",
-            color_discrete_sequence=px.colors.qualitative.Vivid,
-            hole=0.3,
-        )
-        
-        fig_dtype.update_traces(textinfo="percent+label")
-        fig_dtype.update_layout(
-            height=400,
-            margin=dict(l=30, r=30, t=30, b=30),
-            showlegend=True
-        )
-        
-        st.plotly_chart(fig_dtype, use_container_width=True)
-    else:
-        st.info("No data type information available")
+        if dtype_counts:
+            dtype_df = pd.DataFrame(
+                list(dtype_counts.items()), 
+                columns=["Data Type", "Count"]
+            ).sort_values("Count", ascending=False)
+            
+            fig_dtype = px.pie(
+                dtype_df,
+                names="Data Type",
+                values="Count",
+                color="Data Type",
+                color_discrete_sequence=px.colors.qualitative.Vivid,
+                hole=0.3,
+                title="Data Type Distribution"
+            )
+            
+            fig_dtype.update_traces(textinfo="percent+label")
+            fig_dtype.update_layout(
+                height=400,
+                margin=dict(l=30, r=30, t=50, b=30),
+                showlegend=True
+            )
+            
+            st.plotly_chart(fig_dtype, use_container_width=True)
+        else:
+            st.info("No data type information available")
     
-    # ───────────────────────────────────────────────
-    # 🔐 Sensitive Data Classification Overview
-    # ───────────────────────────────────────────────
+    with col2:
+        # AI Classification Distribution
+        classification_counts = {}
+        for col, data in result["result_table"].items():
+            if col == "_dataset_insights":
+                continue
+            classification = data.get("classification", "Unknown")
+            classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        
+        if classification_counts:
+            class_df = pd.DataFrame(
+                list(classification_counts.items()), 
+                columns=["Classification", "Count"]
+            ).sort_values("Count", ascending=False).head(8)
+            
+            fig_class = px.pie(
+                class_df,
+                names="Classification",
+                values="Count", 
+                color="Classification",
+                color_discrete_sequence=px.colors.qualitative.Pastel,
+                hole=0.3,
+                title="AI Classification Distribution"
+            )
+            
+            fig_class.update_traces(textinfo="percent+label")
+            fig_class.update_layout(
+                height=400,
+                margin=dict(l=30, r=30, t=50, b=30),
+                showlegend=True
+            )
+            
+            st.plotly_chart(fig_class, use_container_width=True)
+        else:
+            st.info("No AI classifications available")
+    
+    # Enhanced Classification Summary Table
+    st.markdown("### 📊 Classification Summary")
+    st.dataframe(df_summary, use_container_width=True, height=300)
+
+    # Sensitive Data Classification Overview
     st.markdown("### 🔐 Sensitive Data Classification Overview")
 
-    # Collect all DLP findings with their categories
+    # Collect all DLP findings with their classifications
     dlp_findings = []
     for col, data in result["result_table"].items():
-        if col == "_dataset_insights":  # Skip dataset insights
+        if col == "_dataset_insights":
             continue
-        categories = data.get("categories", [])
+        classification = data.get("classification", "Unknown")
         info_types = data.get("dlp_info_types", [])
         
         for info_type in info_types:
             # Extract clean info type name (remove count)
             clean_type = re.sub(r"\s*\(x?\d+\)", "", info_type, flags=re.IGNORECASE).strip()
-            if clean_type and categories:
-                primary_category = data.get("primary_category", "Unknown")
+            if clean_type:
                 dlp_findings.append({
                     "InfoType": clean_type,
-                    "Category": primary_category,
+                    "Classification": classification,
                     "Column": col
                 })
 
     if dlp_findings:
         dlp_df = pd.DataFrame(dlp_findings)
         
-        # Category distribution
-        category_summary = dlp_df["Category"].value_counts().reset_index()
-        category_summary.columns = ["Category", "Count"]
-        category_summary = category_summary.sort_values("Count", ascending=False)
+        # Classification distribution
+        classification_summary = dlp_df["Classification"].value_counts().reset_index()
+        classification_summary.columns = ["Classification", "Count"]
+        classification_summary = classification_summary.sort_values("Count", ascending=False)
 
-        # Pie Chart for category distribution
-        if not category_summary.empty:
+        # Pie Chart for classification distribution
+        if not classification_summary.empty:
             pie_fig = px.pie(
-                category_summary,
-                names="Category",
+                classification_summary,
+                names="Classification",
                 values="Count",
-                color="Category",
+                color="Classification",
                 color_discrete_sequence=px.colors.qualitative.Vivid,
                 hole=0.4,
-                title="Detected Sensitive Data Categories",
+                title="Detected Data Classifications",
             )
 
-            pie_fig.update_traces(textinfo="percent+label", pull=[0.05] * len(category_summary))
+            pie_fig.update_traces(textinfo="percent+label", pull=[0.05] * len(classification_summary))
             pie_fig.update_layout(
                 showlegend=True,
                 height=400,
@@ -596,22 +639,22 @@ if result and "result_table" in result:
 
             st.plotly_chart(pie_fig, config={"displayModeBar": False}, use_container_width=True)
 
-        # InfoType breakdown by category
+        # InfoType breakdown by classification
         st.markdown("#### 📊 Detailed InfoType Breakdown")
         
         # Create frequency table
-        freq_df = dlp_df.groupby(["Category", "InfoType"]).size().reset_index(name="Count")
+        freq_df = dlp_df.groupby(["Classification", "InfoType"]).size().reset_index(name="Count")
         
-        # Category selector
-        available_categories = sorted(dlp_df["Category"].unique())
-        selected_category = st.selectbox(
-            "Select Category to Explore:",
-            available_categories,
+        # Classification selector
+        available_classifications = sorted(dlp_df["Classification"].unique())
+        selected_classification = st.selectbox(
+            "Select Classification to Explore:",
+            available_classifications,
             index=0,
         )
 
         # Filter and display
-        filtered_df = freq_df[freq_df["Category"] == selected_category].sort_values("Count", ascending=True)
+        filtered_df = freq_df[freq_df["Classification"] == selected_classification].sort_values("Count", ascending=True)
         
         if not filtered_df.empty:
             bar_fig = px.bar(
@@ -620,7 +663,7 @@ if result and "result_table" in result:
                 x="Count",
                 orientation="h",
                 color="InfoType",
-                title=f"InfoTypes in '{selected_category}' Category",
+                title=f"InfoTypes in '{selected_classification}' Classification",
                 text="Count",
                 color_discrete_sequence=px.colors.qualitative.Pastel,
                 height=400,
@@ -644,138 +687,109 @@ if result and "result_table" in result:
 
             st.plotly_chart(bar_fig, config={"displayModeBar": False}, use_container_width=True)
         else:
-            st.info(f"No InfoTypes found in '{selected_category}' category")
+            st.info(f"No InfoTypes found in '{selected_classification}' classification")
 
-        # Show columns with their primary categories
+        # Show columns with their classifications
         st.markdown("#### 🗂️ Column-Level Classification")
-        category_data = []
+        classification_data = []
         for col, data in result["result_table"].items():
-            if col == "_dataset_insights":  # Skip dataset insights
+            if col == "_dataset_insights":
                 continue
             if data.get("dlp_info_types"):
-                category_data.append({
+                classification_data.append({
                     "Column": col,
-                    "Primary Category": data.get("primary_category", "Unknown"),
+                    "Classification": data.get("classification", "Unknown"),
                     "InfoTypes": ", ".join(data.get("dlp_info_types", [])),
                     "Data Type": data.get("inferred_dtype", "unknown"),
-                    "Sensitivity": data.get("data_sensitivity", "N/A")
+                    "Sensitivity": data.get("data_sensitivity", "N/A").title()
                 })
         
-        if category_data:
-            category_df = pd.DataFrame(category_data)
-            st.dataframe(category_df, use_container_width=True)
+        if classification_data:
+            classification_df = pd.DataFrame(classification_data)
+            st.dataframe(classification_df, use_container_width=True)
     else:
         st.success("🎉 No sensitive data detected by DLP!")
 
-    st.markdown("### 🧩 Column Classification Summary")
-    st.dataframe(df_summary, use_container_width=True, height=250)
-
     st.divider()
-    st.subheader("📘 Column-Level Analysis")
+    st.subheader("🔍 Column-Level Analysis")
 
     # Filter out dataset insights from column selection
     col_names = [col for col in result["result_table"].keys() if col != "_dataset_insights"]
-    selected_col = st.selectbox("Select a column for detailed profiling", col_names)
+    
+    # FIX: Only show column selection if there are columns
+    if col_names:
+        selected_col = st.selectbox("Select a column for detailed profiling", col_names)
 
-    if selected_col:
-        col_data = result["result_table"][selected_col]
+        if selected_col:
+            col_data = result["result_table"][selected_col]
 
-        st.markdown(f"### 🔍 Column: `{selected_col}`")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📘 Data Type", col_data.get("inferred_dtype", "unknown"))
-        c2.metric("🏷️ Classification", col_data.get("classification", "Not detected"))
-        c3.metric("📂 Primary Category", col_data.get("primary_category", "N/A"))
-        c4.metric("🔒 Sensitivity", col_data.get("data_sensitivity", "N/A").title())
-
-        # ENHANCED: Show numeric metrics for numeric columns
-        if col_data.get("inferred_dtype") in ["int", "float"]:
-            stats = col_data.get("stats", {})
-            if "min" in stats and "max" in stats:
-                st.markdown("#### 📊 Numeric Statistics")
-                num_cols = st.columns(4)
-                num_cols[0].metric("Min", f"{stats['min']:.2f}")
-                num_cols[1].metric("Max", f"{stats['max']:.2f}")
-                num_cols[2].metric("Mean", f"{stats.get('mean', 0):.2f}")
-                num_cols[3].metric("Median", f"{stats.get('median', 0):.2f}")
-
-        st.markdown("#### 💼 Business Insights")
-        insights = interpret_stats(col_data.get("stats", {}))
-        for i in insights:
-            st.markdown(f"- {i}")
-
-        # NEW: AI-Powered Analysis
-        st.markdown("#### 🤖 AI-Powered Analysis")
-        
-        ai_classification = col_data.get("ai_classification", {})
-        
-        if ai_classification and not isinstance(ai_classification, str):
-            col1, col2, col3 = st.columns(3)
+            st.markdown(f"### 🔍 Column: `{selected_col}`")
             
-            with col1:
-                business_class = ai_classification.get("business_classification", "Not classified")
-                st.metric("🏢 Business Role", business_class)
-            
-            with col2:
-                sensitivity = ai_classification.get("data_sensitivity", "low").title()
-                st.metric("🔒 Sensitivity", sensitivity)
-            
-            with col3:
-                privacy_risk = ai_classification.get("privacy_risk", "low").title()
-                st.metric("🛡️ Privacy Risk", privacy_risk)
-            
-            # Governance policies
-            if "suggested_governance_policies" in ai_classification:
-                with st.expander("📋 Suggested Governance Policies"):
-                    for policy in ai_classification["suggested_governance_policies"]:
-                        st.markdown(f"- {policy}")
-            
-            # Compliance considerations
-            if "compliance_considerations" in ai_classification and ai_classification["compliance_considerations"] != ["none"]:
-                with st.expander("⚖️ Compliance Considerations"):
-                    for compliance in ai_classification["compliance_considerations"]:
-                        st.markdown(f"- {compliance}")
-        
-        # AI-Enhanced Quality Rules
-        ai_rules = col_data.get("ai_enhanced_rules", [])
-        if ai_rules:
-            st.markdown("#### 🎯 AI-Generated Quality Rules")
-            for rule in ai_rules[:5]:  # Show top 5 rules
-                confidence = rule.get('confidence', 0)
-                rule_type = rule.get('type', 'general')
-                confidence_color = "green" if confidence > 0.8 else "orange" if confidence > 0.6 else "red"
-                
-                st.markdown(
-                    f"- **{rule['rule']}** "
-                    f"<span style='color: {confidence_color}; font-weight: bold;'>({confidence*100:.0f}% confidence)</span> "
-                    f"`{rule_type}`",
-                    unsafe_allow_html=True
-                )
+            # SIMPLIFIED metrics
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Data Type", col_data.get("inferred_dtype", "unknown"))
+            c2.metric("Classification", col_data.get("classification", "N/A"))
+            c3.metric("Sensitivity", col_data.get("data_sensitivity", "N/A").title())
+            c4.metric("Confidence", f"{col_data.get('overall_confidence', 0.5)*100:.1f}%")
 
-        st.markdown("#### 🧩 Profiling Rules")
-        rules = col_data.get("rules", [])
-        if rules:
-            for rule in rules:
-                confidence = rule.get('confidence', 0.5)
-                st.markdown(f"- {rule.get('rule')} (confidence: {confidence:.1%})")
-        else:
-            st.info("No profiling rules available.")
+            # Show DLP findings clearly
+            dlp_types = col_data.get("dlp_info_types", [])
+            if dlp_types:
+                st.markdown("#### 🔐 DLP Findings")
+                for dlp_type in dlp_types:
+                    st.success(f"• {dlp_type}")
 
-        st.markdown("#### 🔐 DLP Findings")
-        dlp_types = col_data.get("dlp_info_types", [])
-        if dlp_types:
-            unique_dlp = list(set(dlp_types))
-            st.success(", ".join(unique_dlp))
-        else:
-            st.info("No DLP findings for this column.")
+            # Enhanced numeric metrics for numeric columns
+            if col_data.get("inferred_dtype") in ["int", "float"]:
+                stats = col_data.get("stats", {})
+                if "min" in stats and "max" in stats:
+                    st.markdown("#### 📊 Numeric Statistics")
+                    num_cols = st.columns(4)
+                    num_cols[0].metric("Min", f"{stats['min']:.2f}")
+                    num_cols[1].metric("Max", f"{stats['max']:.2f}")
+                    num_cols[2].metric("Mean", f"{stats.get('mean', 0):.2f}")
+                    num_cols[3].metric("Median", f"{stats.get('median', 0):.2f}")
 
-        if col_data.get("dlp_samples"):
-            with st.expander("📋 DLP matched samples"):
-                st.json(col_data["dlp_samples"])
+            st.markdown("#### 💼 Business Insights")
+            insights = interpret_stats(col_data.get("stats", {}))
+            for i in insights:
+                st.markdown(f"- {i}")
+
+            # AI-Enhanced Quality Rules
+            ai_rules = col_data.get("ai_enhanced_rules", [])
+            if ai_rules:
+                st.markdown("#### 🎯 AI-Generated Quality Rules")
+                for rule in ai_rules[:5]:
+                    confidence = rule.get('confidence', 0)
+                    rule_type = rule.get('type', 'general')
+                    confidence_color = "green" if confidence > 0.8 else "orange" if confidence > 0.6 else "red"
+                    
+                    st.markdown(
+                        f"- **{rule['rule']}** "
+                        f"<span style='color: {confidence_color}; font-weight: bold;'>({confidence*100:.0f}% confidence)</span> "
+                        f"`{rule_type}`",
+                        unsafe_allow_html=True
+                    )
+
+            st.markdown("#### 🧩 Profiling Rules")
+            rules = col_data.get("rules", [])
+            if rules:
+                for rule in rules:
+                    confidence = rule.get('confidence', 0.5)
+                    st.markdown(f"- {rule.get('rule')} (confidence: {confidence:.1%})")
+            else:
+                st.info("No profiling rules available.")
+
+            if col_data.get("dlp_samples"):
+                with st.expander("📋 DLP matched samples"):
+                    st.json(col_data["dlp_samples"])
+    else:
+        st.warning("No columns available for analysis")
 
 else:
-    st.info("👈 Enter a GCS path and click **Run Profiling** to begin.")
+    st.info("👈 Enter a GCS path and click **Run Profiling** to begin AI-powered data analysis.")
 
-# Optimized chatbot section - REPLACE THIS ENTIRE SECTION IN YOUR streamlit_app.py
+# Chatbot section
 st.markdown("---")
 st.subheader("💬 Chat About Your Data")
 
@@ -784,7 +798,7 @@ if not st.session_state.profiling_result:
 else:
     profiling_result = st.session_state.profiling_result
     
-    with st.expander("🤖 Chat with Gemini 2.5 Flash", expanded=True):
+    with st.expander("🤖 Chat with Gemini AI", expanded=True):
         # Chat management buttons
         col1, col2, col3 = st.columns([2, 1, 1])
         with col2:
@@ -801,7 +815,7 @@ else:
         # Display chat history
         if st.session_state.chat_history:
             st.markdown("**💭 Conversation History:**")
-            for role, msg in st.session_state.chat_history[-8:]:  # Show last 8 messages
+            for role, msg in st.session_state.chat_history[-8:]:
                 if role == "user":
                     st.chat_message("user").write(f"**You:** {msg}")
                 else:
@@ -827,18 +841,16 @@ else:
                 # Initialize Vertex AI
                 project_id = profiling_result.get("project", os.getenv("GCP_PROJECT"))
                 vertexai.init(project=project_id, location="us-central1")
-                model = GenerativeModel("gemini-2.5-flash")
+                model = GenerativeModel("gemini-1.5-flash-001")
                 
-                # FIXED CONTEXT: Use COMPLETE dataset information
+                # Build context from profiling results
                 result_table = profiling_result.get('result_table', {})
                 
-                # Build COMPREHENSIVE dataset statistics
+                # Build dataset statistics
                 total_columns = profiling_result.get('columns_profiled', 0)
                 data_type_counts = {}
                 sensitive_columns = []
                 quality_issues = []
-                column_details = []
-                numeric_columns = []
                 
                 for col, data in result_table.items():
                     if col == "_dataset_insights":
@@ -848,10 +860,6 @@ else:
                     dtype = data.get("inferred_dtype", "unknown")
                     data_type_counts[dtype] = data_type_counts.get(dtype, 0) + 1
                     
-                    # Track numeric columns
-                    if dtype in ["int", "float"]:
-                        numeric_columns.append(col)
-                    
                     # Track sensitive columns
                     if data.get("dlp_info_types"):
                         sensitive_columns.append(col)
@@ -859,73 +867,32 @@ else:
                     # Track quality issues
                     if data.get("stats", {}).get("null_pct", 0) > 0.1:
                         quality_issues.append(col)
-                    
-                    # Store column details
-                    column_details.append({
-                        "column": col,
-                        "data_type": dtype,
-                        "classification": data.get("classification", "Unknown"),
-                        "primary_category": data.get("primary_category", "Unknown"),
-                        "sensitivity": data.get("data_sensitivity", "low"),
-                        "null_percentage": data.get("stats", {}).get("null_pct", 0) * 100,
-                        "dlp_findings": data.get("dlp_info_types", [])
-                    })
-                
-                # Calculate percentages
-                data_type_percentages = {}
-                for dtype, count in data_type_counts.items():
-                    data_type_percentages[dtype] = (count / total_columns) * 100
                 
                 # Get AI insights
                 ai_insights = result_table.get('_dataset_insights', {})
                 
-                # Build ACCURATE and COMPLETE context
+                # Build context
                 context = f"""
-                You are a data profiling expert analyzing this dataset. Use the COMPLETE profiling results below to answer questions accurately.
+                You are a data profiling expert analyzing this dataset.
 
                 DATASET OVERVIEW:
                 - Total Columns: {total_columns}
                 - Total Rows: {profiling_result.get('rows_profiled', 0)}
-                - Project: {profiling_result.get('project', 'Unknown')}
-                - Execution Time: {profiling_result.get('execution_time_sec', 0)} seconds
-
-                COMPLETE DATA TYPE DISTRIBUTION:
-                {chr(10).join([f"- {dtype}: {count} columns ({percentage:.1f}%)" for dtype, count, percentage in zip(data_type_counts.keys(), data_type_counts.values(), data_type_percentages.values())])}
-
-                NUMERIC COLUMNS ({len(numeric_columns)}):
-                {', '.join(numeric_columns) if numeric_columns else 'None'}
-
-                SENSITIVE COLUMNS ({len(sensitive_columns)}):
-                {', '.join(sensitive_columns) if sensitive_columns else 'None'}
-
-                QUALITY ISSUES ({len(quality_issues)} columns with >10% nulls):
-                {', '.join(quality_issues) if quality_issues else 'None'}
-
-                COLUMN CLASSIFICATIONS SUMMARY:
-                - String columns: {data_type_counts.get('string', 0)}
-                - Integer columns: {data_type_counts.get('int', 0)}
-                - Float columns: {data_type_counts.get('float', 0)}
-                - Date columns: {data_type_counts.get('date', 0)}
-                - Boolean columns: {data_type_counts.get('boolean', 0)}
-                - Unknown types: {data_type_counts.get('unknown', 0)}
+                - Data Types: {data_type_counts}
+                - Sensitive Columns: {len(sensitive_columns)}
+                - Quality Issues: {len(quality_issues)} columns with >10% nulls
 
                 AI INSIGHTS:
                 - Executive Summary: {ai_insights.get('executive_summary', 'No summary available')}
                 - Data Quality Score: {ai_insights.get('data_quality_score', 'Not available')}
-                - Privacy Risk Level: {ai_insights.get('privacy_risk_level', 'Not available')}
 
-                IMPORTANT: 
-                - You have access to ALL {total_columns} columns in the dataset
-                - Use the ACTUAL data type counts and percentages provided above
-                - Be specific and reference actual numbers and percentages
-                - If the user asks about data types, use the complete distribution above
-                - If they ask about specific columns, reference the actual column names from the profiling results
+                Question: {user_input}
+
+                Provide a detailed answer based on the dataset profiling results:
                 """
-
-                prompt = f"{context}\n\nQuestion: {user_input}\n\nProvide a detailed answer based on the complete dataset profiling results:"
                 
                 with st.spinner("🔍 Analyzing your data..."):
-                    response = model.generate_content(prompt)
+                    response = model.generate_content(context)
                     if response.candidates and response.candidates[0].content.parts:
                         answer = response.candidates[0].content.parts[0].text
                     else:

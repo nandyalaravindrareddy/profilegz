@@ -1,7 +1,7 @@
 import os, re, json
 import asyncio
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from typing import Dict, List, Any  # ADD THIS IMPORT
+from typing import Dict, List, Any
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
@@ -30,12 +30,13 @@ def get_vertex_model(model_name="gemini-2.5-flash"):
         try:
             from vertexai import init
             from vertexai.preview.generative_models import GenerativeModel
-            PROJECT_ID = os.getenv("GCP_PROJECT")
+            PROJECT_ID = os.getenv("GCP_PROJECT","custom-plating-475002-j7")
             LOCATION = os.getenv("LOCATION", "us-central1")
             init(project=PROJECT_ID, location=LOCATION)
             _vertex_models[model_name] = GenerativeModel(model_name)
+            logger.info(f"✅ Vertex AI model {model_name} initialized successfully")
         except Exception as e:
-            logger.error(f"Vertex AI initialization failed for {model_name}: {e}")
+            logger.error(f"❌ Vertex AI initialization failed for {model_name}: {e}")
     return _vertex_models.get(model_name)
 
 @retry(
@@ -66,7 +67,7 @@ async def _call_llm_optimized(prompt: str, model_name: str = None):
             logger.error(f"OpenAI call failed: {e}")
             raise
     else:
-        model = get_vertex_model(model_name or "gemini-2.5-flash")
+        model = get_vertex_model(model_name or "gemini-1.5-flash-001")
         if not model:
             raise RuntimeError("No LLM available")
         
@@ -123,7 +124,7 @@ async def generate_data_quality_rules_ai(column_name: str, sample_values: List, 
     """
     
     try:
-        result = await _call_llm_optimized(prompt, "gemini-2.5-flash")
+        result = await _call_llm_optimized(prompt, "gemini-1.5-flash-001")
         return result if isinstance(result, dict) else {"quality_rules": [], "error": "Invalid response format"}
     except Exception as e:
         logger.warning(f"AI quality rule generation failed for {column_name}: {e}")
@@ -152,7 +153,7 @@ async def generate_column_classification_ai(column_name: str, sample_values: Lis
     """
     
     try:
-        result = await _call_llm_optimized(prompt, "gemini-2.5-flash")
+        result = await _call_llm_optimized(prompt, "gemini-1.5-flash-001")
         return result if isinstance(result, dict) else {"business_classification": "Unknown", "data_sensitivity": "low"}
     except Exception as e:
         logger.warning(f"AI classification failed for {column_name}: {e}")
@@ -197,7 +198,7 @@ async def generate_dataset_summary_ai(profile_results: Dict) -> Dict:
     """
     
     try:
-        result = await _call_llm_optimized(prompt, "gemini-2.5-flash")
+        result = await _call_llm_optimized(prompt, "gemini-1.5-flash-001")
         return result if isinstance(result, dict) else {"executive_summary": "Analysis unavailable"}
     except Exception as e:
         logger.warning(f"AI dataset summary failed: {e}")

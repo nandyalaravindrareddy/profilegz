@@ -22,7 +22,7 @@ numpy>=2.1.1
 # ───────────────────────────────
 google-cloud-storage>=2.18.2
 google-cloud-dlp>=3.17.1
-vertexai>=1.66.0  # Gemini 2.5 Flash support
+vertexai>=1.66.0
 google-auth>=2.34.0
 google-api-core>=2.19.0
 

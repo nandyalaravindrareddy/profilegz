@@ -35,8 +35,6 @@ def shannon_entropy_optimized(values):
     values_tuple = tuple(str(v) for v in values if pd.notna(v))
     return cached_shannon_entropy(values_tuple)
 
-# In profiler.py - enhance JUST the numeric detection section in infer_dtype_and_stats_optimized function
-
 def infer_dtype_and_stats_optimized(series: pd.Series):
     """Optimized dtype inference with enhanced numeric statistics"""
     n = len(series)
@@ -79,11 +77,11 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
                 "negatives_count": int((numeric_values < 0).sum())
             })
         else:
-            # String-based type detection (existing code - UNCHANGED)
+            # String-based type detection
             sample_size = min(50, non_null_count)
             sample = non_null_series.sample(sample_size) if sample_size > 0 else non_null_series
             
-            # Date detection - FIXED: Handle empty samples
+            # Date detection
             try:
                 dt_series = pd.to_datetime(sample, errors="coerce")
                 dt_count = dt_series.notna().sum()
@@ -98,7 +96,7 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
                 else:
                     # Boolean detection
                     str_sample = sample.astype(str).str.lower()
-                    if set(str_sample) <= {"true", "false", "0", "1", "yes", "no"}:
+                    if set(str_sample) <= {"true", "false", "0", "1", "yes", "no", "active", "inactive"}:
                         dtype = "boolean"
                     else:
                         dtype = "string"
@@ -106,12 +104,12 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
                 logger.warning(f"Date detection failed: {e}")
                 dtype = "string"
 
-    # Optimized statistics calculation (existing code - UNCHANGED)
+    # Optimized statistics calculation
     distinct_count = series.nunique()
     stats["entropy"] = round(shannon_entropy_optimized(series.dropna().tolist()), 3)
     stats["distinct_pct"] = round(distinct_count / non_null_count if non_null_count else 0, 3)
     
-    # Cardinality classification (existing code - UNCHANGED)
+    # Cardinality classification
     if stats["distinct_pct"] == 1:
         stats["cardinality"] = "high"
     elif stats["distinct_pct"] >= 0.2:
@@ -188,75 +186,243 @@ def local_rules_optimized(series: pd.Series):
 
     return rules
 
+def data_driven_classification(col_data: dict) -> str:
+    """Classification based on data patterns and statistics"""
+    col_name = col_data.get('debug_name', '').lower()
+    dtype = col_data.get("inferred_dtype", "unknown")
+    stats = col_data.get("stats", {})
+    
+    # Account number detection
+    if (any(term in col_name for term in ['account', 'acct', 'acc', 'num', 'no', 'id']) and 
+        dtype in ["int", "string"] and 
+        stats.get('distinct_pct', 0) > 0.8):
+        return "Financial Account Number"
+    
+    # SAR/Risk indicator detection  
+    if (any(term in col_name for term in ['risk', 'flag', 'alert', 'suspicious', 'sar', 'compliance', 'status']) or
+        (dtype == "boolean") or
+        (stats.get('distinct_pct', 0) <= 3)):  # Low cardinality suggests flags
+        return "Risk Indicator"
+    
+    # Balance/amount detection
+    if (any(term in col_name for term in ['balance', 'amount', 'value', 'price', 'cost', 'fee']) and
+        dtype in ["int", "float"]):
+        return "Transaction Amount"
+    
+    # Personal information detection
+    if any(term in col_name for term in ['birth', 'dob']):
+        return "Customer Date of Birth"
+    
+    if any(term in col_name for term in ['name', 'first', 'last', 'fullname']):
+        return "Customer Name"
+    
+    if any(term in col_name for term in ['email', 'phone', 'contact']):
+        return "Customer Contact Information"
+    
+    if any(term in col_name for term in ['country', 'state', 'city', 'address', 'location']):
+        return "Geographical Location"
+    
+    # Default data type based classification
+    if dtype == "date":
+        return "Timestamp"
+    elif dtype in ["int", "float"]:
+        if stats.get('distinct_pct', 0) == 1:
+            return "Unique Identifier"
+        return "Numeric Measurement"
+    elif dtype == "boolean":
+        return "Status Flag"
+    else:
+        if stats.get('distinct_pct', 0) == 1:
+            return "Unique Identifier"
+        return "Text Data"
+
+# In profiler.py - REPLACE the _enhance_classification function
+
+# In profiler.py - REPLACE the _enhance_classification function
+
 def _enhance_classification(col_data: dict) -> str:
-    """Enhanced classification logic with AI prioritization - FIXED"""
+    """ENHANCED classification with better DLP-based logic"""
     
-    # Debug logging to see what's available
     col_name = col_data.get('debug_name', 'unknown')
-    logger.info(f"🔍 Classification data for column: {col_name}")
-    logger.info(f"  - primary_category: {col_data.get('primary_category')}")
-    logger.info(f"  - business_context: {col_data.get('business_context')}")
-    logger.info(f"  - dlp_info_types: {col_data.get('dlp_info_types', [])}")
-    logger.info(f"  - ai_classification type: {type(col_data.get('ai_classification'))}")
     
-    # Priority 1: Use primary_category from DLP AI classification (this is what's actually populated)
+    # PRIORITY 1: Use primary_category if it's specific
     primary_category = col_data.get("primary_category")
-    if primary_category and primary_category not in ["No Category", "Unknown", "Other"]:
+    if primary_category and primary_category not in ["Unknown", "No Category", "Other", "Generic Data", "Business Identifier"]:
         logger.info(f"✅ Using primary_category: {primary_category}")
         return primary_category
     
-    # Priority 2: Use business_context from DLP AI classification
-    business_context = col_data.get("business_context", "")
-    if business_context and business_context not in ["Unknown", "Fallback Classification", "Classification Failed"]:
-        logger.info(f"✅ Using business_context: {business_context}")
-        # Extract meaningful classification from business_context
-        if "classified as" in business_context.lower():
-            # Extract the classification from phrases like "Classified as Personal Identifiers based on..."
-            match = re.search(r"classified as ([^,.]+)", business_context, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        return business_context
-    
-    # Priority 3: Use AI classification from separate Vertex AI call
-    ai_classification = col_data.get("ai_classification", {})
-    if isinstance(ai_classification, dict):
-        business_class = ai_classification.get("business_classification")
-        if business_class and business_class != "Unknown":
-            logger.info(f"✅ Using ai_classification: {business_class}")
-            return business_class
-    
-    # Priority 4: Use DLP info types if available
+    # PRIORITY 2: Use DLP info types for SPECIFIC classification
     dlp_info_types = col_data.get("dlp_info_types", [])
     if dlp_info_types:
-        # Extract primary info type from DLP
-        primary_dlp = dlp_info_types[0].split(' (x')[0]  # Remove count
-        logger.info(f"✅ Using DLP info type: {primary_dlp}")
-        return f"DLP: {primary_dlp}"
+        dlp_based_class = get_specific_dlp_classification(dlp_info_types, col_name)
+        if dlp_based_class != "Business Identifier":
+            logger.info(f"✅ Using DLP-based classification: {dlp_based_class}")
+            return dlp_based_class
     
-    # Priority 5: Use LLM classification if available
-    llm_output = col_data.get("llm_output", {})
-    if isinstance(llm_output, dict) and llm_output.get("classification"):
-        logger.info(f"✅ Using LLM output: {llm_output.get('classification')}")
-        return llm_output["classification"]
+    # PRIORITY 3: Use column name patterns for specific classification
+    column_based_class = get_column_name_classification(col_name)
+    if column_based_class != "Business Identifier":
+        logger.info(f"✅ Using column-based classification: {column_based_class}")
+        return column_based_class
     
-    # Priority 6: Data type based classification
+    # PRIORITY 4: Simple data type classification
+    classification = get_simple_data_type_classification(col_data)
+    logger.info(f"✅ Using data type classification: {classification}")
+    return classification
+
+def get_specific_dlp_classification(dlp_info_types: List[str], column_name: str) -> str:
+    """Get specific classification based on DLP findings"""
+    column_lower = column_name.lower()
+    
+    # Extract primary DLP types
+    for info_type in dlp_info_types:
+        clean_type = re.sub(r'\s*\(x?\d+\)', '', info_type).strip().upper()
+        
+        if "EMAIL" in clean_type:
+            return "Customer Contact Information"
+        elif "PERSON_NAME" in clean_type:
+            return "Customer Name"
+        elif "PHONE" in clean_type:
+            return "Customer Contact Information"
+        elif "LOCATION" in clean_type or "ADDRESS" in clean_type:
+            return "Geographical Location"
+        elif "CREDIT_CARD" in clean_type:
+            return "Payment Information"
+        elif "DATE_OF_BIRTH" in clean_type:
+            return "Customer Date of Birth"
+        elif "IBAN" in clean_type:
+            return "Financial Account Number"
+        elif "SSN" in clean_type:
+            return "National Identification"
+    
+    return "Business Identifier"
+
+def get_column_name_classification(column_name: str) -> str:
+    """Get specific classification based on column name patterns"""
+    column_lower = column_name.lower()
+    
+    if any(term in column_lower for term in ['email', 'e-mail']):
+        return "Customer Contact Information"
+    elif any(term in column_lower for term in ['phone', 'mobile', 'telephone']):
+        return "Customer Contact Information"
+    elif any(term in column_lower for term in ['name', 'first', 'last', 'fullname']):
+        return "Customer Name"
+    elif any(term in column_lower for term in ['country', 'state', 'city', 'address', 'location']):
+        return "Geographical Location"
+    elif any(term in column_lower for term in ['account', 'acct', 'acc', 'number']):
+        return "Financial Account Number"
+    elif any(term in column_lower for term in ['balance', 'amount', 'value']):
+        return "Transaction Amount"
+    elif any(term in column_lower for term in ['dob', 'birth', 'age']):
+        return "Customer Date of Birth"
+    elif any(term in column_lower for term in ['credit', 'card', 'payment']):
+        return "Payment Information"
+    elif any(term in column_lower for term in ['ssn', 'social', 'security']):
+        return "National Identification"
+    elif any(term in column_lower for term in ['passport']):
+        return "Government ID"
+    elif any(term in column_lower for term in ['aadhaar', 'uidai']):
+        return "Government ID"
+    elif any(term in column_lower for term in ['pan', 'permanent']):
+        return "Tax Identification"
+    elif any(term in column_lower for term in ['iban', 'swift']):
+        return "Financial Account Number"
+    elif any(term in column_lower for term in ['risk', 'sar', 'flag', 'alert', 'suspicious', 'narrative']):
+        return "Risk Indicator"
+    elif any(term in column_lower for term in ['customer_id', 'user_id', 'client_id']):
+        return "Customer Identifier"
+    
+    return "Business Identifier"
+
+def get_simple_data_type_classification(col_data: dict) -> str:
+    """Simple data type based classification"""
     dtype = col_data.get("inferred_dtype", "unknown")
     stats = col_data.get("stats", {})
     
     if dtype == "date":
-        classification = "Temporal Data"
+        return "Timestamp"
     elif dtype in ["int", "float"]:
-        if stats.get("distinct_pct", 0) == 1:
-            classification = "Unique Identifier"
-        else:
-            classification = "Numeric Data"
+        if stats.get('distinct_pct', 0) == 1:
+            return "Unique Identifier"
+        return "Numeric Data"
     elif dtype == "boolean":
-        classification = "Boolean Flag"
+        return "Status Flag"
     else:
-        classification = "Text Data"
+        if stats.get('distinct_pct', 0) == 1:
+            return "Unique Identifier"
+        return "Text Data"
+
+def get_dlp_based_classification_simple(dlp_types: List[str], column_name: str) -> str:
+    """Simple DLP-based classification"""
+    column_lower = column_name.lower()
     
-    logger.info(f"✅ Using dtype-based classification: {classification}")
-    return classification
+    # Simple mapping
+    for dlp_type in dlp_types:
+        if "EMAIL" in dlp_type:
+            return "Customer Contact Information"
+        elif "PERSON_NAME" in dlp_type:
+            return "Customer Name"
+        elif "PHONE" in dlp_type:
+            return "Customer Contact Information"
+        elif "LOCATION" in dlp_type or "ADDRESS" in dlp_type:
+            return "Geographical Location"
+        elif "CREDIT_CARD" in dlp_type:
+            return "Payment Information"
+        elif "DATE_OF_BIRTH" in dlp_type:
+            return "Customer Date of Birth"
+    
+    # Column name fallbacks
+    if any(term in column_lower for term in ['email']):
+        return "Customer Contact Information"
+    elif any(term in column_lower for term in ['phone']):
+        return "Customer Contact Information"
+    elif any(term in column_lower for term in ['name']):
+        return "Customer Name"
+    elif any(term in column_lower for term in ['country', 'city', 'address']):
+        return "Geographical Location"
+    elif any(term in column_lower for term in ['account']):
+        return "Financial Account Number"
+    elif any(term in column_lower for term in ['balance', 'amount']):
+        return "Transaction Amount"
+    elif any(term in column_lower for term in ['dob', 'birth']):
+        return "Customer Date of Birth"
+    
+    return "Business Data"
+
+def simple_data_driven_classification(col_data: dict) -> str:
+    """Simple data-driven classification without complex logic"""
+    col_name = col_data.get('debug_name', '').lower()
+    dtype = col_data.get("inferred_dtype", "unknown")
+    
+    # Very simple mapping
+    if 'email' in col_name:
+        return "Customer Contact Information"
+    elif 'phone' in col_name:
+        return "Customer Contact Information"
+    elif 'name' in col_name:
+        return "Customer Name"
+    elif any(term in col_name for term in ['country', 'city', 'address']):
+        return "Geographical Location"
+    elif any(term in col_name for term in ['account', 'acct']):
+        return "Financial Account Number"
+    elif any(term in col_name for term in ['balance', 'amount']):
+        return "Transaction Amount"
+    elif any(term in col_name for term in ['dob', 'birth']):
+        return "Customer Date of Birth"
+    elif any(term in col_name for term in ['credit', 'card']):
+        return "Payment Information"
+    elif any(term in col_name for term in ['risk', 'sar', 'flag']):
+        return "Risk Indicator"
+    
+    # Basic type-based
+    if dtype == "date":
+        return "Timestamp"
+    elif dtype in ["int", "float"]:
+        return "Numeric Data"
+    elif dtype == "boolean":
+        return "Status Flag"
+    else:
+        return "Text Data"
 
 async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: bool = True, max_workers: int = 4):
     """
@@ -312,8 +478,9 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
     for col, meta in results.items():
         meta["debug_name"] = col
     
-    # Phase 2: AI-enhanced DLP inspection
+    # Phase 2: AI-enhanced DLP inspection (PRIMARY CLASSIFICATION)
     try:
+        logger.info("🚀 Starting PRIMARY GenAI classification...")
         dlp_summary = await enhance_dlp_findings_with_genai(project_id, df)
     except Exception as e:
         logger.error(f"DLP failed: {e}")
@@ -331,6 +498,7 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
             results[col]["compliance_considerations"] = meta.get("compliance_considerations", [])
             results[col]["recommended_handling"] = meta.get("recommended_handling", "standard")
             results[col]["confidence_score"] = meta.get("confidence_score", 0.5)
+            results[col]["detected_patterns"] = meta.get("detected_patterns", [])
     
     # Phase 3: AI-enhanced classification and rules
     ai_tasks = []
@@ -373,29 +541,7 @@ async def run_profiling_optimized(df: pd.DataFrame, project_id: str, parallel: b
         except Exception as e:
             logger.warning(f"AI rule generation failed: {e}")
     
-    # Phase 5: Optimized LLM enrichment (batched)
-    text_cols = [
-        c for c, v in results.items() 
-        if (v["inferred_dtype"] == "string" and 
-            not results[c].get("classification") and
-            len(df) <= 500)
-    ]
-    
-    if text_cols:
-        # Batch samples for LLM
-        samples = {
-            c: df[c].dropna().astype(str).head(10).tolist()
-            for c in text_cols
-        }
-        try:
-            llm_outputs = await call_llm_for_columns_optimized(samples)
-            for c, out in llm_outputs.items():
-                if c in results:
-                    results[c]["llm_output"] = out
-        except Exception as e:
-            logger.warning(f"LLM enrichment skipped: {e}")
-    
-    # Enhanced classification after all processing
+    # Phase 5: Enhanced classification after all processing
     for col, meta in results.items():
         if col == "_dataset_insights":
             continue
