@@ -35,8 +35,10 @@ def shannon_entropy_optimized(values):
     values_tuple = tuple(str(v) for v in values if pd.notna(v))
     return cached_shannon_entropy(values_tuple)
 
+# In profiler.py - enhance JUST the numeric detection section in infer_dtype_and_stats_optimized function
+
 def infer_dtype_and_stats_optimized(series: pd.Series):
-    """Optimized dtype inference with reduced operations"""
+    """Optimized dtype inference with enhanced numeric statistics"""
     n = len(series)
     if n == 0:
         return {"dtype": "string", "stats": {"null_pct": 1.0, "entropy": 0.0, "distinct_pct": 0.0}}
@@ -64,14 +66,20 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
             else:
                 dtype = "float"
                 
+            # ENHANCED: Add comprehensive numeric statistics
             stats.update({
                 "min": float(numeric_values.min()),
                 "max": float(numeric_values.max()), 
                 "mean": float(numeric_values.mean()),
-                "std": float(numeric_values.std())
+                "median": float(numeric_values.median()),
+                "std": float(numeric_values.std()),
+                "q1": float(numeric_values.quantile(0.25)),
+                "q3": float(numeric_values.quantile(0.75)),
+                "zeros_count": int((numeric_values == 0).sum()),
+                "negatives_count": int((numeric_values < 0).sum())
             })
         else:
-            # String-based type detection
+            # String-based type detection (existing code - UNCHANGED)
             sample_size = min(50, non_null_count)
             sample = non_null_series.sample(sample_size) if sample_size > 0 else non_null_series
             
@@ -98,12 +106,12 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
                 logger.warning(f"Date detection failed: {e}")
                 dtype = "string"
 
-    # Optimized statistics calculation
+    # Optimized statistics calculation (existing code - UNCHANGED)
     distinct_count = series.nunique()
     stats["entropy"] = round(shannon_entropy_optimized(series.dropna().tolist()), 3)
     stats["distinct_pct"] = round(distinct_count / non_null_count if non_null_count else 0, 3)
     
-    # Cardinality classification
+    # Cardinality classification (existing code - UNCHANGED)
     if stats["distinct_pct"] == 1:
         stats["cardinality"] = "high"
     elif stats["distinct_pct"] >= 0.2:
@@ -112,7 +120,7 @@ def infer_dtype_and_stats_optimized(series: pd.Series):
         stats["cardinality"] = "low"
 
     return {"dtype": dtype, "stats": stats}
-
+    
 async def generate_ai_enhanced_rules(series: pd.Series, col_name: str, basic_stats: Dict):
     """Generate AI-enhanced data quality rules"""
     sample_values = series.dropna().astype(str).head(20).tolist()

@@ -181,9 +181,34 @@ def generate_pdf_report(profiling_result):
         df_summary = pd.DataFrame(summary_data)
         pdf.add_table(df_summary, [35, 25, 40, 25, 25, 20])
     
+    # Enhanced: Numeric Data Analysis
+    pdf.add_page()
+    pdf.chapter_title("2. Numeric Data Analysis")
+    
+    numeric_cols = []
+    for col, data in result_table.items():
+        if col == "_dataset_insights":
+            continue
+        if data.get("inferred_dtype") in ["int", "float"]:
+            stats = data.get("stats", {})
+            numeric_cols.append({
+                "Column": col,
+                "Min": f"{stats.get('min', 'N/A')}",
+                "Max": f"{stats.get('max', 'N/A')}",
+                "Mean": f"{stats.get('mean', 'N/A')}",
+                "Median": f"{stats.get('median', 'N/A')}",
+                "Std Dev": f"{stats.get('std', 'N/A')}"
+            })
+    
+    if numeric_cols:
+        df_numeric = pd.DataFrame(numeric_cols)
+        pdf.add_table(df_numeric, [30, 15, 15, 15, 15, 15])
+    else:
+        pdf.chapter_body("No numeric columns detected.")
+    
     # Sensitive Data Analysis
     pdf.add_page()
-    pdf.chapter_title("2. Sensitive Data Analysis")
+    pdf.chapter_title("3. Sensitive Data Analysis")
     
     sensitive_cols = []
     for col, data in result_table.items():
@@ -205,7 +230,7 @@ def generate_pdf_report(profiling_result):
     
     # Data Quality Assessment
     pdf.add_page()
-    pdf.chapter_title("3. Data Quality Assessment")
+    pdf.chapter_title("4. Data Quality Assessment")
     
     quality_issues = []
     for col, data in result_table.items():
@@ -228,7 +253,7 @@ def generate_pdf_report(profiling_result):
     
     # AI Insights
     pdf.add_page()
-    pdf.chapter_title("4. AI-Powered Insights")
+    pdf.chapter_title("5. AI-Powered Insights")
     
     insights = result_table.get('_dataset_insights', {})
     if insights:
@@ -352,29 +377,45 @@ if run_btn and should_process_request():
 
 result = st.session_state.profiling_result
 
-# Optimized helper functions
+# Enhanced helper functions with numeric statistics
 @st.cache_data
 def interpret_stats(stats):
-    """Cached stats interpretation"""
+    """Cached stats interpretation with enhanced numeric data display"""
     insights = []
     if not stats:
         return ["No statistics available."]
     
+    # Null analysis
     if stats.get("null_pct", 0) == 0:
         insights.append("✅ No missing values")
     else:
         insights.append(f"⚠️ {stats['null_pct'] * 100:.1f}% missing values")
     
+    # Distinct values
     if stats.get("distinct_pct") == 1:
         insights.append("🔢 All values unique")
     elif stats.get("distinct_pct") is not None:
         insights.append(f"🔢 {stats['distinct_pct'] * 100:.1f}% unique values")
     
+    # ENHANCED: Numeric statistics display
+    if "min" in stats and "max" in stats:
+        insights.append(f"📊 Range: {stats['min']:.2f} → {stats['max']:.2f}")
+    if "mean" in stats:
+        insights.append(f"📈 Average: {stats['mean']:.2f}")
+    if "median" in stats:
+        insights.append(f"📊 Median: {stats['median']:.2f}")
+    if "std" in stats:
+        insights.append(f"📐 Std Dev: {stats['std']:.2f}")
+    
+    # Additional numeric insights
+    if "zeros_count" in stats and stats["zeros_count"] > 0:
+        insights.append(f"🔘 Contains {stats['zeros_count']} zero values")
+    if "negatives_count" in stats and stats["negatives_count"] > 0:
+        insights.append(f"🔻 Contains {stats['negatives_count']} negative values")
+    
+    # Date insights
     if "min_date" in stats and "max_date" in stats:
         insights.append(f"📅 Date range: {stats['min_date']} → {stats['max_date']}")
-    
-    if "mean" in stats:
-        insights.append(f"📈 Average value: {stats['mean']:.2f}")
     
     return insights
 
@@ -646,6 +687,17 @@ if result and "result_table" in result:
         c3.metric("📂 Primary Category", col_data.get("primary_category", "N/A"))
         c4.metric("🔒 Sensitivity", col_data.get("data_sensitivity", "N/A").title())
 
+        # ENHANCED: Show numeric metrics for numeric columns
+        if col_data.get("inferred_dtype") in ["int", "float"]:
+            stats = col_data.get("stats", {})
+            if "min" in stats and "max" in stats:
+                st.markdown("#### 📊 Numeric Statistics")
+                num_cols = st.columns(4)
+                num_cols[0].metric("Min", f"{stats['min']:.2f}")
+                num_cols[1].metric("Max", f"{stats['max']:.2f}")
+                num_cols[2].metric("Mean", f"{stats.get('mean', 0):.2f}")
+                num_cols[3].metric("Median", f"{stats.get('median', 0):.2f}")
+
         st.markdown("#### 💼 Business Insights")
         insights = interpret_stats(col_data.get("stats", {}))
         for i in insights:
@@ -723,7 +775,7 @@ if result and "result_table" in result:
 else:
     st.info("👈 Enter a GCS path and click **Run Profiling** to begin.")
 
-# Optimized chatbot section
+# Optimized chatbot section - REPLACE THIS ENTIRE SECTION IN YOUR streamlit_app.py
 st.markdown("---")
 st.subheader("💬 Chat About Your Data")
 
@@ -762,7 +814,7 @@ else:
         user_input = st.text_area(
             "Your question:", 
             key="chat_input",
-            placeholder="E.g., What sensitive data was found? Which columns have quality issues?",
+            placeholder="E.g., What percentage of columns are numeric? Which columns have quality issues?",
             height=80
         )
         
@@ -777,78 +829,100 @@ else:
                 vertexai.init(project=project_id, location="us-central1")
                 model = GenerativeModel("gemini-2.5-flash")
                 
-                # ENHANCED CONTEXT: Use actual classification data from profiling results
+                # FIXED CONTEXT: Use COMPLETE dataset information
                 result_table = profiling_result.get('result_table', {})
                 
-                # Build comprehensive classification summary
-                classification_summary = {}
-                sensitive_columns_by_type = {}
+                # Build COMPREHENSIVE dataset statistics
+                total_columns = profiling_result.get('columns_profiled', 0)
+                data_type_counts = {}
+                sensitive_columns = []
+                quality_issues = []
                 column_details = []
+                numeric_columns = []
                 
                 for col, data in result_table.items():
                     if col == "_dataset_insights":
                         continue
                     
-                    classification = data.get("classification", "Unknown")
-                    primary_category = data.get("primary_category", "Unknown")
-                    data_type = data.get("inferred_dtype", "unknown")
-                    sensitivity = data.get("data_sensitivity", "low")
-                    dlp_findings = data.get("dlp_info_types", [])
+                    # Count data types
+                    dtype = data.get("inferred_dtype", "unknown")
+                    data_type_counts[dtype] = data_type_counts.get(dtype, 0) + 1
                     
-                    # Count classifications
-                    classification_summary[classification] = classification_summary.get(classification, 0) + 1
+                    # Track numeric columns
+                    if dtype in ["int", "float"]:
+                        numeric_columns.append(col)
                     
-                    # Group sensitive columns by type
-                    if dlp_findings or sensitivity in ["medium", "high"]:
-                        if classification not in sensitive_columns_by_type:
-                            sensitive_columns_by_type[classification] = []
-                        sensitive_columns_by_type[classification].append(col)
+                    # Track sensitive columns
+                    if data.get("dlp_info_types"):
+                        sensitive_columns.append(col)
+                    
+                    # Track quality issues
+                    if data.get("stats", {}).get("null_pct", 0) > 0.1:
+                        quality_issues.append(col)
                     
                     # Store column details
                     column_details.append({
                         "column": col,
-                        "classification": classification,
-                        "primary_category": primary_category,
-                        "data_type": data_type,
-                        "sensitivity": sensitivity,
-                        "dlp_findings": dlp_findings
+                        "data_type": dtype,
+                        "classification": data.get("classification", "Unknown"),
+                        "primary_category": data.get("primary_category", "Unknown"),
+                        "sensitivity": data.get("data_sensitivity", "low"),
+                        "null_percentage": data.get("stats", {}).get("null_pct", 0) * 100,
+                        "dlp_findings": data.get("dlp_info_types", [])
                     })
                 
-                # Get AI insights if available
+                # Calculate percentages
+                data_type_percentages = {}
+                for dtype, count in data_type_counts.items():
+                    data_type_percentages[dtype] = (count / total_columns) * 100
+                
+                # Get AI insights
                 ai_insights = result_table.get('_dataset_insights', {})
                 
-                # Build enhanced context
+                # Build ACCURATE and COMPLETE context
                 context = f"""
-                You are a data profiling expert analyzing this dataset. Use the ACTUAL profiling results below to answer questions accurately.
+                You are a data profiling expert analyzing this dataset. Use the COMPLETE profiling results below to answer questions accurately.
 
-                DATASET PROFILE RESULTS:
+                DATASET OVERVIEW:
+                - Total Columns: {total_columns}
+                - Total Rows: {profiling_result.get('rows_profiled', 0)}
                 - Project: {profiling_result.get('project', 'Unknown')}
-                - Dataset: {profiling_result.get('rows_profiled', 0)} rows, {profiling_result.get('columns_profiled', 0)} columns
-                - Execution time: {profiling_result.get('execution_time_sec', 0)} seconds
+                - Execution Time: {profiling_result.get('execution_time_sec', 0)} seconds
 
-                ACTUAL DATA CLASSIFICATIONS FOUND:
-                {json.dumps(classification_summary, indent=2)}
+                COMPLETE DATA TYPE DISTRIBUTION:
+                {chr(10).join([f"- {dtype}: {count} columns ({percentage:.1f}%)" for dtype, count, percentage in zip(data_type_counts.keys(), data_type_counts.values(), data_type_percentages.values())])}
 
-                SENSITIVE COLUMNS BY TYPE:
-                {json.dumps(sensitive_columns_by_type, indent=2)}
+                NUMERIC COLUMNS ({len(numeric_columns)}):
+                {', '.join(numeric_columns) if numeric_columns else 'None'}
 
-                DETAILED COLUMN INFORMATION (first 10 columns):
-                {json.dumps(column_details[:10], indent=2)}
+                SENSITIVE COLUMNS ({len(sensitive_columns)}):
+                {', '.join(sensitive_columns) if sensitive_columns else 'None'}
+
+                QUALITY ISSUES ({len(quality_issues)} columns with >10% nulls):
+                {', '.join(quality_issues) if quality_issues else 'None'}
+
+                COLUMN CLASSIFICATIONS SUMMARY:
+                - String columns: {data_type_counts.get('string', 0)}
+                - Integer columns: {data_type_counts.get('int', 0)}
+                - Float columns: {data_type_counts.get('float', 0)}
+                - Date columns: {data_type_counts.get('date', 0)}
+                - Boolean columns: {data_type_counts.get('boolean', 0)}
+                - Unknown types: {data_type_counts.get('unknown', 0)}
 
                 AI INSIGHTS:
                 - Executive Summary: {ai_insights.get('executive_summary', 'No summary available')}
-                - Key Risks: {', '.join(ai_insights.get('key_risks', ['No risks identified']))}
-                - Recommended Actions: {', '.join(ai_insights.get('recommended_actions', ['No specific recommendations']))}
+                - Data Quality Score: {ai_insights.get('data_quality_score', 'Not available')}
+                - Privacy Risk Level: {ai_insights.get('privacy_risk_level', 'Not available')}
 
-                IMPORTANT: When answering questions about data classifications, use the ACTUAL classification types found in the profiling results above. 
-                Do not make up generic PII/SPII categories unless they match the actual classifications found.
-
-                Common classification types in this dataset include: {', '.join(classification_summary.keys())}
-
-                Be specific and reference the actual column names and their classifications.
+                IMPORTANT: 
+                - You have access to ALL {total_columns} columns in the dataset
+                - Use the ACTUAL data type counts and percentages provided above
+                - Be specific and reference actual numbers and percentages
+                - If the user asks about data types, use the complete distribution above
+                - If they ask about specific columns, reference the actual column names from the profiling results
                 """
-                
-                prompt = f"{context}\n\nQuestion: {user_input}"
+
+                prompt = f"{context}\n\nQuestion: {user_input}\n\nProvide a detailed answer based on the complete dataset profiling results:"
                 
                 with st.spinner("🔍 Analyzing your data..."):
                     response = model.generate_content(prompt)
@@ -866,3 +940,4 @@ else:
                 
             except Exception as e:
                 st.error(f"💥 Chat error: {str(e)}")
+                st.info("💡 Make sure Vertex AI is properly configured and you have the necessary permissions.")
