@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  data-profiler:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - GCP_PROJECT=${GCP_PROJECT:-wfargo-cdo25cbh-928}
+      - LOCATION=${LOCATION:-us-central1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./gcp_credentials.json:/app/gcp_credentials.json:ro
+      - ./data:/app/data:rw
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://data-profiler:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - profiler-network
+
+  streamlit-ui:
+    build: 
+      context: .
+      dockerfile: Dockerfile.streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://data-profiler:8080  # ✅ Use service name
+      - GCP_PROJECT=${GCP_PROJECT:-wfargo-cdo25cbh-928}
+    depends_on:
+      - data-profiler
+    volumes:
+      - ./gcp_credentials.json:/app/gcp_credentials.json:ro
+    restart: unless-stopped
+    networks:
+      - profiler-network
+
+networks:
+  profiler-network:
+    driver: bridge
