@@ -44,31 +44,58 @@ with DAG(
             # TENANT CONFIG (REQUIRED)
             # -------------------------------------
             "tenant_config": {
-                "src_table": "custom-plating-475002-j7.dlp_audit.simple_customer_data",
-                "out_table": "custom-plating-475002-j7.dlp_audit.simple_customer_data_beam",
-
-                "mapping": [
-                    {
-                        "column": "email",
-                        "info_type_rules": [
-                            {
-                                "infoTypes": ["EMAIL_ADDRESS"],
-                                "rule": {"type": "REPLACE", "replace_with": "[EMAIL]"},
-                            }
-                        ],
-                    },
-                    {
-                        "column": "credit_card",
-                        "info_type_rules": [
-                            {
-                                "infoTypes": ["CREDIT_CARD_NUMBER"],
-                                "rule": {"type": "REPLACE", "replace_with": "[CREDIT_CARD]"},
-                            }
-                        ],
-                    },
-                ],
-
-                "custom_info_types": [],
-            },
+  "src_table": "custom-plating-475002-j7.dlp_audit.simple_customer_data",
+  "out_table": "custom-plating-475002-j7.dlp_audit.simple_customer_data_beam",
+  "mapping": [
+    {
+      "column": "email",
+      "info_type_rules": [
+        {
+          "infoTypes": ["EMAIL_ADDRESS"],
+          "rule": {
+            "type": "REPLACE",
+            "replace_with": "[EMAIL]"
+          }
+        }
+      ]
+    },
+    {
+      "column": "ssn",
+      "info_type_rules": [
+        {
+          "infoTypes": ["US_SOCIAL_SECURITY_NUMBER"],
+          "rule": {
+            "type": "REPLACE",
+            "replace_with": "[SSN_REDACTED]"
+          }
+        }
+      ]
+    },
+    {
+      "column": "credit_card",
+      "info_type_rules": [
+        {
+          "infoTypes": ["CREDIT_CARD_NUMBER"],
+          "rule": {
+            "type": "MASK_LAST_N",
+            "n": 4
+          }
+        }
+      ]
+    },
+    {
+      "column": "phone",
+      "info_type_rules": [
+        { 
+          "infoTypes": ["PHONE_NUMBER"],
+          "rule": {
+            "type": "MASK",
+            "n": 6
+          }
+        }
+      ]
+    }
+  ],
+},
         },
     )
