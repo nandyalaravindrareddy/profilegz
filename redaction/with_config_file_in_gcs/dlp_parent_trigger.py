@@ -27,10 +27,23 @@ with DAG("dlp_parent_trigger", schedule_interval=None, default_args=DEFAULT_ARGS
                 "redaction_params": {"n": 4}
             },
             {
-            "column": "ssn",
-            "infoTypes": ["US_SOCIAL_SECURITY_NUMBER"],
-            "redaction_method": "FULL_REDACT"
-            }
+                "column": "comments",
+                "info_type_rules": [
+                    {
+                        "infoTypes": ["US_SOCIAL_SECURITY_NUMBER"],
+                        "redaction_method": "FULL_REDACT",
+                    },
+                    {
+                        "infoTypes": ["CREDIT_CARD_NUMBER"],
+                        "redaction_method": "MASK_LAST_N",
+                        "redaction_params": {"n": 4},
+                    },
+                    {
+                        "infoTypes": ["PASSWORD"],
+                        "redaction_method": "FULL_REDACT",
+                    },
+                ],
+            },
 
         ],
         "custom_info_types": []

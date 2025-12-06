@@ -34,6 +34,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("beam_dlp_redact")
 
 # -------------------------
+# Helper functions for DLP proto field names
+# -------------------------
+def _to_info_type_dict(info_type_spec):
+    """Convert infoType specification to DLP InfoType dict with correct field names."""
+    if isinstance(info_type_spec, dict):
+        name = info_type_spec.get("name")
+        if name is None:
+            raise ValueError(f"InfoType dict must have a 'name' key: {info_type_spec}")
+        return {"name": name}
+    else:
+        return {"name": str(info_type_spec)}
+
+# -------------------------
 # Map high-level redaction_method -> DLP primitiveTransformation payload
 # -------------------------
 def _replace_config_value(val: str) -> Dict[str, Any]:
@@ -53,9 +66,9 @@ def _primitive_for_method(method: Optional[Any], params: Optional[Dict[str, Any]
       primitive_transformation = <returned dict>
     where the keys inside match DLP v2 proto fields:
       - replace_with_info_type_config
-      - replace_config.new_value.string_value/null_value
-      - character_mask_config.number_to_mask/reverse_order/masking_character
-      - crypto_deterministic_config.crypto_key.kms_wrapped.crypto_key_name/wrapped_key ...
+      - replace_config.new_value.string_value / null_value
+      - character_mask_config.masking_character / number_to_mask / reverse_order
+      - crypto_deterministic_config.crypto_key / surrogate_info_type
     """
 
     if params is None:
@@ -155,7 +168,7 @@ def _primitive_for_method(method: Optional[Any], params: Optional[Dict[str, Any]
 
         crypto_key: Dict[str, Any] = {}
         # If we have a raw wrapped_key, use kms_wrapped.wrapped_key.
-        # If not, we at least pass crypto_key_name (some deployments will expect a template).
+        # If not, we at least pass crypto_key_name.
         if wrapped_key_b64:
             crypto_key["kms_wrapped"] = {
                 "wrapped_key": wrapped_key_b64,
@@ -165,8 +178,6 @@ def _primitive_for_method(method: Optional[Any], params: Optional[Dict[str, Any]
             crypto_key["kms_wrapped"] = {
                 "crypto_key_name": kms_key_name,
             }
-
-        cfg: Dict[str, Any] = {"crypto_key": crypto_key}
 
         surrogate_name = (
             params.get("surrogate_name")
@@ -202,32 +213,81 @@ def build_inspect_config_from_mapping(
     """
     Build InspectConfig with correct DLP v2 fields.
 
-    NOTE:
-      - InspectConfig proto in DLP v2 does NOT have 'include_fields'.
-      - We control scanned columns by which fields we put in item.table (headers & rows).
-    """
-    builtin = set()
-    custom_info_types: List[Dict[str, Any]] = list(extra_custom_info_types or [])
+    IMPORTANT:
+      - We ONLY treat tenant_config['custom_info_types'] (extra_custom_info_types)
+        as actual CustomInfoType objects.
+      - We NEVER treat dicts from mapping/info_type_rules as CustomInfoType.
+      - InspectConfig proto has:
+          * info_types
+          * custom_info_types
+          * include_quote
+        but NOT 'include_fields'.
 
+    mapping (COLUMN_RULES) examples:
+
+      "email": {
+        "infoTypes": ["EMAIL_ADDRESS"],
+        ...
+      }
+
+      "comments": {
+        "info_type_rules": [
+          {
+            "infoTypes": ["US_SOCIAL_SECURITY_NUMBER"],
+            ...
+          },
+          {
+            "infoTypes": ["CREDIT_CARD_NUMBER"],
+            ...
+          }
+        ]
+      }
+
+    extra_custom_info_types is expected to already be in proper DLP
+    CustomInfoType shape, e.g.:
+
+      {
+        "info_type": { "name": "CUSTOM_PASSWORD" },
+        "regex": { "pattern": "(?i)password\\s*[:=]\\s*\\S+" }
+      }
+    """
+
+    builtin: set[str] = set()
+
+    # 1) Collect ALL builtin infoTypes from mapping (strings only)
     for _, entry in mapping.items():
-        its = entry.get("infoTypes") or []
-        for it in its:
+        # Column-level infoTypes
+        its_col = entry.get("infoTypes") or []
+        for it in its_col:
             if isinstance(it, str):
                 builtin.add(it)
-            elif isinstance(it, dict):
-                # assume full custom infoType dict
-                custom_info_types.append(it)
+            # if it's a dict, we assume it's an infoType reference object
+            # (like {"name": "EMAIL_ADDRESS"}), not a CustomInfoType definition,
+            # and we DO NOT treat it as custom_info_type.
 
+        # Per-infoType rules for this column
+        for rule in entry.get("info_type_rules") or []:
+            its_rule = rule.get("infoTypes") or []
+            for it in its_rule:
+                if isinstance(it, str):
+                    builtin.add(it)
+                # again, if it's a dict, we assume {"name": "..."} and ignore it
+                # for custom_info_types.
+
+    # 2) Build the InspectConfig dict in canonical snake_case
     cfg: Dict[str, Any] = {"include_quote": include_quote}
 
     if builtin:
         cfg["info_types"] = [{"name": n} for n in sorted(builtin)]
 
-    if custom_info_types:
-        cfg["custom_info_types"] = custom_info_types
+    # 3) Only use extra_custom_info_types (tenant_config["custom_info_types"])
+    #    as CustomInfoType objects. We do NOT infer any CustomInfoType from mapping.
+    if extra_custom_info_types:
+        cfg["custom_info_types"] = extra_custom_info_types
 
-    # DO NOT add 'include_fields' here – not a field on InspectConfig.
-    # Column-level selection is achieved by controlling the DLP Table's headers & rows.
+    # 4) DO NOT set 'include_fields' here – not part of InspectConfig.
+    #    Column-level filtering is handled by which headers/values we pass
+    #    in the DLP Table (item.table).
 
     return cfg
 
@@ -236,72 +296,124 @@ def build_field_transformations_from_mapping(mapping: Dict[str, Any]) -> List[Di
     """
     Build recordTransformations.fieldTransformations using COLUMN_RULES.
 
-    mapping (COLUMN_RULES) shape:
-      {
-        "email": {
-          "infoTypes": ["EMAIL_ADDRESS"],
-          "redaction_method": "REPLACE_WITH" | {"type": "REPLACE", ...},
-          "redaction_params": {...}
-        },
-        ...
+    mapping (COLUMN_RULES) shape examples:
+
+      # Simple column-level rule
+      "email": {
+        "infoTypes": ["EMAIL_ADDRESS"],
+        "redaction_method": "REPLACE_WITH",
+        "redaction_params": {"replace_with": "[EMAIL]"}
+      }
+
+      # Column with multiple infoTypes and different rules (comments)
+      "comments": {
+        "info_type_rules": [
+          {
+            "infoTypes": ["US_SOCIAL_SECURITY_NUMBER"],
+            "redaction_method": "FULL_REDACT"
+          },
+          {
+            "infoTypes": ["CREDIT_CARD_NUMBER"],
+            "redaction_method": "MASK_LAST_N",
+            "redaction_params": {"n": 4}
+          },
+          {
+            "infoTypes": ["CUSTOM_PASSWORD"],
+            "redaction_method": "FULL_REDACT"
+          }
+        ]
       }
     """
     fts: List[Dict[str, Any]] = []
 
     for col, entry in mapping.items():
         ft: Dict[str, Any] = {"fields": [{"name": col}]}
+
+        # ---- Case 1: per-infoType rules on this column ----
+        info_type_rules = entry.get("info_type_rules") or []
+        if info_type_rules:
+            transformations: List[Dict[str, Any]] = []
+
+            for rule in info_type_rules:
+                rule_info_types = rule.get("infoTypes") or []
+                redaction_method = rule.get("redaction_method")
+                redaction_params = rule.get("redaction_params") or {}
+
+                prim = None
+                if redaction_method is not None:
+                    prim = _primitive_for_method(redaction_method, redaction_params)
+                else:
+                    # If no method given, default to FULL_REDACT for that infoType
+                    prim = {"replace_with_info_type_config": {}}
+
+                if not rule_info_types:
+                    raise ValueError(
+                        f"info_type_rule for column '{col}' must specify 'infoTypes'"
+                    )
+
+                for it in rule_info_types:
+                    it_dict = _to_info_type_dict(it)
+                    transformations.append(
+                        {
+                            "info_types": [it_dict],
+                            "primitive_transformation": prim,
+                        }
+                    )
+
+            if not transformations:
+                raise ValueError(
+                    f"Column '{col}' has info_type_rules but produced no transformations"
+                )
+
+            ft["info_type_transformations"] = {"transformations": transformations}
+            fts.append(ft)
+            continue  # done with this column
+
+        # ---- Case 2: simple column-level rule (existing logic) ----
         info_types = entry.get("infoTypes") or []
         redaction_method = entry.get("redaction_method")
         redaction_params = entry.get("redaction_params") or {}
-
-        logging.info(
-            "build_field_transformations_from_mapping: col=%s method_type=%s method=%r params=%r info_types=%r",
-            col,
-            type(redaction_method),
-            redaction_method,
-            redaction_params,
-            info_types,
-        )
 
         prim = None
         if redaction_method is not None:
             prim = _primitive_for_method(redaction_method, redaction_params)
 
         if info_types and prim is not None:
-            # Per-infoType transforms for this field
-            transforms = []
+            # Per-infoType transforms for this field (same method for all infoTypes)
+            transformations = []
             for it in info_types:
-                it_struct = it if isinstance(it, dict) else {"name": it}
-                transforms.append(
+                it_dict = _to_info_type_dict(it)
+                transformations.append(
                     {
-                        "info_types": [it_struct],
+                        "info_types": [it_dict],
                         "primitive_transformation": prim,
                     }
                 )
-            ft["info_type_transformations"] = {"transformations": transforms}
+            ft["info_type_transformations"] = {"transformations": transformations}
 
         elif prim is not None:
             # Field-level primitive transformation (no per-infoType split)
             ft["primitive_transformation"] = prim
 
         else:
-            # No explicit redaction method; if infoTypes exist, default to FULL_REDACT
+            # No explicit method; if infoTypes exist, default to FULL_REDACT
             if info_types:
-                transforms = []
+                transformations = []
                 for it in info_types:
-                    it_struct = it if isinstance(it, dict) else {"name": it}
-                    transforms.append(
+                    it_dict = _to_info_type_dict(it)
+                    transformations.append(
                         {
-                            "info_types": [it_struct],
+                            "info_types": [it_dict],
                             "primitive_transformation": {
                                 "replace_with_info_type_config": {}
                             },
                         }
                     )
-                ft["info_type_transformations"] = {"transformations": transforms}
+                ft["info_type_transformations"] = {"transformations": transformations}
             else:
                 raise ValueError(
-                    f"Mapping for {col} must provide either 'redaction_method' or 'infoTypes'"
+                    f"Mapping for column '{col}' must provide either 'info_type_rules' "
+                    f"or ('infoTypes' and 'redaction_method')"
                 )
 
         fts.append(ft)
@@ -634,13 +746,14 @@ def run(argv=None):
         col = m.get("column")
         if not col:
             raise RuntimeError("Each mapping entry must include 'column'")
-        info_types = m.get("infoTypes") or m.get("info_type_rules") or []
-        redaction_method = m.get("redaction_method") or m.get("redaction") or m.get("rule")
-        redaction_params = m.get("redaction_params") or m.get("redaction_params", {}) or {}
-        # If user provided high-level "rule" earlier, we accept it too.
-        if not (info_types or redaction_method):
-            raise RuntimeError(f"Mapping for {col} must include infoTypes and/or redaction_method")
-        COLUMN_RULES[col] = {"infoTypes": info_types, "redaction_method": redaction_method, "redaction_params": redaction_params}
+        
+        # Use the mapping directly - preserve the structure
+        COLUMN_RULES[col] = {
+            "infoTypes": m.get("infoTypes") or [],
+            "info_type_rules": m.get("info_type_rules") or [],
+            "redaction_method": m.get("redaction_method"),
+            "redaction_params": m.get("redaction_params") or {}
+        }
 
     logger.info("Columns to scan: %s", list(COLUMN_RULES.keys()))
 
