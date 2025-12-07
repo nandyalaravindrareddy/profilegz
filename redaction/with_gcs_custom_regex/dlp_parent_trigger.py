@@ -44,6 +44,11 @@ with DAG("dlp_parent_trigger", schedule_interval=None, default_args=DEFAULT_ARGS
                         "redaction_method": "REPLACE_WITH",
                         "redaction_params": {"replace_with": "**custom password by dlp**"}
                     },
+                    {
+                        "infoTypes": ["CUSTOM_SAR"],  # Now using custom info type
+                        "redaction_method": "REPLACE_WITH",
+                        "redaction_params": {"replace_with": "SAR_REDACTED"}
+                    },
                 ],
             },
         ],
@@ -52,6 +57,14 @@ with DAG("dlp_parent_trigger", schedule_interval=None, default_args=DEFAULT_ARGS
                 "info_type": {"name": "CUSTOM_PASSWORD"},
                 "regex": {
                     "pattern": r"(?i)(password|passwd|pwd)[\\s]*[:=][\\s]*[^\\s]+",
+                    "group_indexes": [0]
+                },
+                "likelihood": "POSSIBLE"
+            },
+            {
+                "info_type": {"name": "CUSTOM_SAR"},
+                "regex": {
+                    "pattern": r"(?i)\b(SAR|S\.A\.R\.|Suspicious Activity Report)\b",
                     "group_indexes": [0]
                 },
                 "likelihood": "POSSIBLE"
